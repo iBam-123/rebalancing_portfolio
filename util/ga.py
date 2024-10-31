@@ -44,49 +44,39 @@ def get_trend_list(stocks:list, df_list: list, start='1/1/2021', end='31/12/2023
     return trend_list
 
 def cal_portfolio_comp_fitness(asset_list, base_rates, original_portfolio_comp, df_list, date_range, trend_list, cvar_period, mc_period, sp_period, c1, c2, thres, fitness=[]):
-    """Calculates the portfolio comp at each change and updates fitness values
+    """Calculates the portfolio comp at each change and updates fitness values. Returns a boolean changes list
     """
-    num_assets = len(asset_list)
-    
-    # Menyesuaikan base_rates sesuai jumlah asset
-    if len(base_rates) != num_assets:
-        base_rates = [1/num_assets] * num_assets
-        
     change_list = []
     i = 0
     new_portfolio_comp = deepcopy(original_portfolio_comp)
     last_trade_date=[date_range[0]]
-    
     for date in date_range:
-        # Check data availability for all assets
-        empty_data = False
-        asset_data = []
-        for i in range(num_assets):
-            date_data = df_list[i][df_list[i]['Date'] == date]
-            if date_data.empty:
-                empty_data = True
-                break
-            asset_data.append(date_data)
-            
-        if not empty_data:
+        high_risk_date = df_list[0][df_list[0]['Date'] == date]
+        med_risk_date = df_list[1][df_list[1]['Date'] == date]
+        low_risk_date = df_list[2][df_list[2]['Date'] == date]
+        if not (high_risk_date.empty or med_risk_date.empty or low_risk_date.empty):
             if date in trend_list:
-                if len(base_rates) == num_assets:
+                # print('Reallocating at {}'.format(date))
+                # Hack for multiple base rates
+                if len(base_rates) == 3:
                     new_portfolio_comp = util.get_portfolio_comp(original_portfolio_comp, df_list, base_rates, date,
                         cvar_period, mc_period, sp_period, c1, c2)
                 else:
                     new_portfolio_comp = util.get_portfolio_comp(original_portfolio_comp, df_list, base_rates[i], date,
                         cvar_period, mc_period, sp_period, c1, c2)
                     i += 1
-                
+    # With commission
                 change = cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date, 
                     original_portfolio_comp=original_portfolio_comp, thres=thres)
+    # # Without commission
+    #             change = cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date)
+    # #########################
                 original_portfolio_comp = new_portfolio_comp
                 change_list.append(change)
             else:
                 change_list.append((False, 0, date))
-                
     asset_list = cal_fitness_with_nav(df_list, asset_list, last_trade_date[-1], date_range[-1], fitness)
-    return change_list, asset_list, original_portfolio_comp
+    return change_list, asset_list, [original_portfolio_comp[0], original_portfolio_comp[1], original_portfolio_comp[2]]
 
 def cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date: list, original_portfolio_comp=[], thres=0, commisson_rate=1.0/800):
     """Updates asset list with calculated new assets. Returns change_list of (True, asset_list, date) or (False, 0, date)

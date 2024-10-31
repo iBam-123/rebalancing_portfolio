@@ -8,46 +8,34 @@ import sys
 
 def get_portfolio_comp(current_comp: list, df_list: list, base_rates: list, date: pd.Timestamp, 
     cvar_period=[10,10,10], mc_period=[10,10,10], sp_period=[10,10,10], c1=[0,0,0], c2=[0,0,0]):
-    """Modified to handle variable number of assets"""
-    num_assets = len(current_comp)
-    
-    # Extend periods and coefficients if needed
-    if len(cvar_period) != num_assets:
-        cvar_period = [10] * num_assets
-    if len(mc_period) != num_assets:
-        mc_period = [10] * num_assets
-    if len(sp_period) != num_assets:
-        sp_period = [10] * num_assets
-    if len(c1) != num_assets:
-        c1 = [0] * num_assets
-    if len(c2) != num_assets:
-        c2 = [0] * num_assets
-    
+    """ df_list should contain ['High Risk', 'Medium Risk', 'Low Risk'] stocks in order
+    """
     stocks = df_list
-    sum_base_rates = sum(base_rates)
+    sum_base_rates = base_rates[0] + base_rates[1] + base_rates[2]
+    # print("Total base rate = {:.2f}. Tactical rate = {:.2f}".format(sum_base_rates, 1-sum_base_rates))
     sum_factors = []
-    
     for i, stock in enumerate(stocks):
+        # print('{} Stock'.format(stock_class[i]))
         t = stocks[i].index[stocks[i]['Date'] == date].tolist()
+        # If any index does not operate on that date, skip reallocation. Percentile need 2 numbers or more, 0 is always nan
         if t == [] or t[0] == 0 or t[0] == 1:
             return current_comp
         else:
             t = t[0]
-            
+        # print('Index at {}'.format(t))
+        # print('Risk & Market combo = {}'.format(f_risk[i] * f_mc(stock, t)))
         sp = f_sp(stock, t, int(sp_period[i]))
         mr = f_mr(stock, t, int(cvar_period[i]), c2=c2[i])
         mc = f_mc(stock, t, int(mc_period[i]), c1[i])
-        
+        # print(f'sp: {sp}, mr: {mr}, mc: {mc}')
+
         sum_factor = util.modified_tanh(mr * mc) * sp
         sum_factors.append(sum_factor)
-        
     norm_sum_factors = []
     adjustable_comp = 1 - sum_base_rates
-    
-    for i in range(num_assets):
+    for i in range(len(sum_factors)):
         norm_sum_factors.append(adjustable_comp*util.softmax(sum_factors)[i])
-    
-    return [base_rates[i] + norm_sum_factors[i] for i in range(num_assets)]
+    return [base_rates[i] + norm_sum_factors[i] for i in range(len(base_rates))]
 
 def f_mr(df: pd.DataFrame, t: int, period=10, alpha=0.95, c2=0, price_col='Close'):
 	return abs(cvar_percent(df, t, period, alpha, price_col) + c2)

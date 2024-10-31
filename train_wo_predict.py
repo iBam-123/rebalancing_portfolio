@@ -13,9 +13,6 @@ import util
 import config
 import indicators
 import argparse
-import math
-import os
-from util.algo_dataset import get_algo_dataset
 
 tf.compat.v1.disable_eager_execution()
 arg_parser = argparse.ArgumentParser()
@@ -32,9 +29,9 @@ choose_set_num = int(args.choose_set_num)
 load_model = args.load if args.load else False
 
 path = args.path.replace(',', '/')
-weight_decay_beta = 0.1
+weight_decay_beta = float('10e-9')
 
-price_period = 10
+price_period = 30
 risk_level = 1
 
 save_rl_data = True
@@ -58,22 +55,6 @@ tau = 0.0005
 num_actions = 4
 state_dimension = 5
 
-#tambahan
-if args.choose_set_num == 0:
-    state_dimension = 23  # (11 assets * 2 features per asset) + 1 time delta
-    num_actions = 4
-    H = 50  # Hidden layer size
-    batch_size = 32
-    weight_decay_beta = 0.01
-
-# Untuk portfolio 19 assets
-elif args.choose_set_num == 1:
-    state_dimension = 39  # (19 assets * 2 features per asset) + 1 time delta
-    num_actions = 4  
-    H = 80  # Hidden layer size
-    batch_size = 64
-    weight_decay_beta = 0.01
-
 df_list, date_range, trend_list, _ = util.get_algo_dataset(choose_set_num)
 max_ep_length = len(trend_list)
 
@@ -81,13 +62,6 @@ max_ep_length = len(trend_list)
 e_rate = start_e
 step_drop = (start_e - end_e) / annealing_steps
 
-# Definisikan state_dimension berdasarkan jumlah aset
-def get_state_dimension(df_list):
-    num_assets = len(df_list)
-    return num_assets * 2 + 1  # 2 fitur per aset + 1 last_date_delta
-
-# Inisialisasi state_dimension
-state_dimension = get_state_dimension(df_list)
 
 class Qnetwork():
     def __init__(self, H):
@@ -102,153 +76,129 @@ class Qnetwork():
         self.W1 = tf.Variable(tf.random.uniform([H, num_actions], 0, 1))
         self.b1 = tf.Variable(tf.constant(0.1, shape=[num_actions]))
         sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.W1)
-
+        # q out
         self.q_values = tf.matmul(self.y_hidden, self.W1) + self.b1
+        # predict
         self.best_action = tf.argmax(self.q_values, 1)
 
+        # next q
         self.target = tf.compat.v1.placeholder(tf.float32, [1, num_actions])
         self.loss = tf.reduce_sum(tf.square(self.target - self.q_values) + sum_regularization)
         self.update = tf.compat.v1.train.AdamOptimizer(learning_rate=0.001).minimize(self.loss)
 
-if __name__ == "__main__":
-    df_list, date_range, trend_list, stocks = get_algo_dataset(args.choose_set_num)
-    
-    # Validate data
-    print("Validating data...")
-    print(f"date_range length: {len(date_range)}")
-    print(f"trend_list length: {len(trend_list)}")
-    for i, df in enumerate(df_list):
-        print(f"df_list[{i}] shape: {df.shape}")
-        print(f"df_list[{i}] date range: {df['Date'].min()} to {df['Date'].max()}")
-    
-    # Clean and sort dates
-    date_range = sorted(date_range)
-    trend_list = clean_trend_list(trend_list, date_range)
-    
-    # Validate state dimension
-    test_state = get_next_state(0, trend_list, date_range, df_list)
-    if test_state is not None:
-        actual_state_dim = len(test_state)
-        if actual_state_dim != state_dimension:
-            print(f"Warning: state_dimension mismatch. Expected {state_dimension}, got {actual_state_dim}")
-            state_dimension = actual_state_dim
+
 
 def norm_state(state):
     temp = deepcopy(state)
-    num_assets = len(df_list)
-    expected_features = num_assets * 2 + 1
-
-    state_array = np.hstack(temp)
-    if state_array.size != expected_features:
-        print(f"Warning: State size mismatch. Expected {expected_features}, got {state_array.size}")
-        if state_array.size < expected_features:
-            state_array = np.pad(state_array, (0, expected_features - state_array.size))
-        else:
-            state_array = state_array[:expected_features]
-    
-    return np.reshape(state_array, (1, expected_features))
+    return np.reshape(np.hstack(temp), (1, state_dimension))
 
 
 def process_action(action, portfolio_composition):
     new_portfolio_composition = deepcopy(portfolio_composition)
-    num_assets = len(portfolio_composition)
-    step_size = 0.05
-
     if args.full_swing:
-        if action == 0:  # High risk
-            new_portfolio_composition = [0.6] + [0.4 / (num_assets - 1)] * (num_assets - 1)
-        elif action == 1:  # Medium risk
-            mid = num_assets // 2
-            new_portfolio_composition = [0.2] * mid + [0.6] + [0.2 / (num_assets - mid - 1)] * (num_assets - mid - 1)
-        elif action == 2:  # Low risk
-            new_portfolio_composition = [0.4 / (num_assets - 1)] * (num_assets - 1) + [0.6]
-        elif action == 3:  # Balanced
-            new_portfolio_composition = [1 / num_assets] * num_assets
+        ####################### Full switch ##############################
+        # high risk up, med risk up
+        if action == 0:
+            for _ in range(3):
+                new_portfolio_composition[0] = 0.8
+                new_portfolio_composition[1] = 0.1
+                new_portfolio_composition[2] = 0.1
+        elif action == 1:
+            for _ in range(3):
+                new_portfolio_composition[0] = 0.1
+                new_portfolio_composition[1] = 0.8
+                new_portfolio_composition[2] = 0.1
+        elif action == 2:
+            for _ in range(3):
+                new_portfolio_composition[0] = 0.45
+                new_portfolio_composition[1] = 0.45
+                new_portfolio_composition[2] = 0.1
+        elif action == 3:
+            for _ in range(3):
+                new_portfolio_composition[0] = 0.1
+                new_portfolio_composition[1] = 0.1
+                new_portfolio_composition[2] = 0.8
+        ###############################################################
     else:
-        if action == 0:  # Increase high risk assets
-            for i in range(num_assets - 1):
-                if new_portfolio_composition[i+1] - step_size >= 0:
-                    new_portfolio_composition[i] += step_size
-                    new_portfolio_composition[i+1] -= step_size
-        elif action == 1:  # Increase medium risk assets
-            mid = num_assets // 2
-            for i in range(mid):
-                if new_portfolio_composition[i] - step_size >= 0:
-                    new_portfolio_composition[mid] += step_size
-                    new_portfolio_composition[i] -= step_size
-            for i in range(mid+1, num_assets):
-                if new_portfolio_composition[i] - step_size >= 0:
-                    new_portfolio_composition[mid] += step_size
-                    new_portfolio_composition[i] -= step_size
-        elif action == 2:  # Increase low risk assets
-            for i in range(num_assets - 1):
-                if new_portfolio_composition[i] - step_size >= 0:
-                    new_portfolio_composition[-1] += step_size
-                    new_portfolio_composition[i] -= step_size
-        elif action == 3:  # No change
-            pass
-    
+        ####################### Gradual ##############################
+        # high risk up, med risk up
+        if action == 0:
+            for _ in range(3):
+                # low risk base rate enough, L -> H
+                if new_portfolio_composition[2] - 0.1 >= 0.1:
+                    new_portfolio_composition[0] += 0.1
+                    new_portfolio_composition[2] -= 0.1
+                # med risk base rate enough, M -> H
+                if new_portfolio_composition[1] - 0.1 >= 0.1:
+                    new_portfolio_composition[0] += 0.1
+                    new_portfolio_composition[1] -= 0.1
+        elif action == 1:
+            for _ in range(3):
+                # high risk base rate enough, H -> M
+                if new_portfolio_composition[0] - 0.1 >= 0.1:
+                    new_portfolio_composition[1] += 0.1
+                    new_portfolio_composition[0] -= 0.1
+                # low risk base rate enough, L -> M
+                if new_portfolio_composition[2] - 0.1 >= 0.1:
+                    new_portfolio_composition[1] += 0.1
+                    new_portfolio_composition[2] -= 0.1
+        elif action == 2:
+            for _ in range(3):
+                # low risk base rate enough, L -> H
+                if new_portfolio_composition[0] - 0.1 >= 0.1:
+                    new_portfolio_composition[2] += 0.1
+                    new_portfolio_composition[0] -= 0.1
+                # low risk base rate enough, L -> M
+                if new_portfolio_composition[1] - 0.1 >= 0.1:
+                    new_portfolio_composition[2] += 0.1
+                    new_portfolio_composition[1] -= 0.1
+        elif action == 3:
+            for _ in range(3):
+                # high risk base rate enough, H -> L
+                if new_portfolio_composition[0] - 0.1 >= 0.1:
+                    new_portfolio_composition[2] += 0.1
+                    new_portfolio_composition[0] -= 0.1
+                # med risk base rate enough, M -> L
+                if new_portfolio_composition[1] - 0.1 >= 0.1:
+                    new_portfolio_composition[2] += 0.1
+                    new_portfolio_composition[1] -= 0.1
+        ################################################
     return new_portfolio_composition
 
 
 def get_next_state(current_index, trend_list, date_range, df_list):
-    """Gets the next state"""
-    if current_index + 1 >= len(trend_list):
-        print(f"Warning: current_index {current_index} is out of range for trend_list of length {len(trend_list)}")
-        return None
-
     date = trend_list[current_index + 1]
-    try:
-        date_idx = [i for i, d in enumerate(date_range) if d == date][0]
-    except IndexError:
-        print(f"Warning: Date {date} not found in date_range")
-        # Find closest date
-        date_idx = min(range(len(date_range)), key=lambda i: abs(date_range[i] - date))
-
+    date_idx = [i for i, cur_date in enumerate(date_range) if date == cur_date][0]
     state_ = ()
-    for i in range(2):  # For high risk and medium risk assets
+
+    for i in range(2):
+        # Check price data for state. Get the price_period num of days price before period
         price_list = []
         if date_idx - price_period >= 0:
             price_dates = date_range[date_idx - price_period:date_idx]
         else:
             price_dates = date_range[0:date_idx]
-            price_list.extend([0] * (price_period - len(price_dates)))
+            for _ in range(price_period - date_idx):
+                price_list.append(0)
 
-        # Safely get price data
-        for d in price_dates:
-            try:
-                price = df_list[i].loc[df_list[i]['Date'] == d, 'Close'].values[0]
-                price_list.append(price)
-            except (IndexError, KeyError) as e:
-                print(f"Warning: Could not get price for date {d} from df_list[{i}]")
-                price_list.append(price_list[-1] if price_list else 0)
+        for date in price_dates:
+            price_list.append(df_list[i][df_list[i]['Date'] == date]['Close'].values[0])
 
-        # Calculate indicators
         df = pd.DataFrame({'Close': price_list})
         df['EMA'] = indicators.exponential_moving_avg(df, window_size=6, center=False)
         df['MACD_Line'] = indicators.macd_line(df, ema1_window_size=3, ema2_window_size=6, center=False)
         df['MACD_Signal'] = indicators.macd_signal(df, window_size=6, ema1_window_size=3, ema2_window_size=6,
                                                    center=False)
-
-        # Safe normalization
-        try:
-            ema_price = util.z_score_normalization(df.iloc[-1]['EMA'], df['EMA'].tolist())
-            macd_line = df['MACD_Line']
-            macd_signal = df['MACD_Signal']
-            macd = [macd_line.iloc[i] - macd_signal.iloc[i] for i in range(len(macd_line))]
-            macd = util.scale(macd[-1], macd)
-        except Exception as e:
-            print(f"Warning: Error calculating indicators: {e}")
-            ema_price, macd = 0, 0
-
-        if math.isnan(ema_price) or math.isnan(macd):
+        ema_price = util.z_score_normalization(df.iloc[-1]['EMA'], df['EMA'].tolist())
+        macd_line = df['MACD_Line']
+        macd_signal = df['MACD_Signal']
+        macd = [macd_line.iloc[i] - macd_signal.iloc[i] for i in range(len(macd_line))]
+        macd = util.scale(macd[-1], macd)
+        if (math.isnan(ema_price) or math.isnan(macd)):
             print(f'nan encountered: ema = {ema_price}, macd = {macd}')
-            ema_price = 0 if math.isnan(ema_price) else ema_price
-            macd = 0 if math.isnan(macd) else macd
 
         state_ += (ema_price, macd)
 
-    # Add date delta
     if current_index == -1:
         last_date_delta = 0
     else:
@@ -286,25 +236,18 @@ def get_predicted_indicator_df(df, price_list, scaler, model):
 
 
 def get_reward(asset_list, action, current_index, trend_list, date_range, portfolio_composition, df_list):
-    """Calculates reward for the action taken"""
     new_asset_list = deepcopy(asset_list)
-    reward_period = 10
+    reward_period = 15
     commisson_rate = 1.0 / 800
 
-    if current_index + 1 >= len(trend_list):
-        print(f"Warning: current_index {current_index} is out of range for trend_list of length {len(trend_list)}")
-        return 0, portfolio_composition, new_asset_list
-
+    # get reward from reward_period number of days
     date = trend_list[current_index]
-    try:
-        date_idx = date_range.index(date)
-    except ValueError:
-        print(f"Warning: Date {date} not found in date_range")
-        date_idx = min(range(len(date_range)), key=lambda i: abs(date_range[i] - date))
-
+    date_idx = [i for i, cur_date in enumerate(date_range) if date == cur_date][0]
+    # Check price data for state. Get the price_period num of days price before period
     if date_idx + reward_period < len(date_range):
         reward_date = date_range[date_idx + reward_period]
     else:
+        # Not checked in gradual approach
         reward_date = date_range[-1]
 
     passive_asset_sum, _ = get_reward_asset_sum(new_asset_list, portfolio_composition, date, reward_date,
@@ -337,6 +280,7 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
                                                                              changed_composition_rates, cur_date,
                                                                              date_range[date_idx + i + 1],
                                                                              commisson_rate)
+                # print('From: ',cur_date,' to ',date_range[date_idx+i+1])
             else:
                 date = cur_date
                 break
@@ -351,23 +295,30 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
     trend_list_len = len(trend_list)
     # scale to 0.5-1 depending on trend position
     time_scaling_factor = 0.5 * (trend_list_len - current_index) / trend_list_len + 0.5
+    # print('Asset difference: ', changed_asset_sum - passive_asset_sum)
+    # print('old portfolio: ', portfolio_composition, 'New: ', changed_composition_rates)
+    # print('Date: ', date, 'Change:', (changed_asset_sum - passive_asset_sum) / passive_asset_sum  * 100)
+    # print('Changed sum: ', changed_asset_sum, 'Passive sum: ', passive_asset_sum)
     reward = (changed_asset_sum - passive_asset_sum) / passive_asset_sum * time_scaling_factor
+    # print('Reward: ', reward)
+    # print('nav Reward: ', nav_reward/10000000)
     return reward + nav_reward / 10000000, changed_composition_rates, new_asset_list
 
 
 def get_reward_asset_sum(asset_list, changed_composition_rates, current_date, reward_date, commisson_rate):
     temp_asset_list = deepcopy(asset_list)
-    
-    # Ubah range sesuai jumlah asset di portfolio
-    num_assets = len(asset_list)
-    for i in range(num_assets):
+    # print(temp_asset_list)
+    for i in range(3):
         # Update asset values
         previous_close_price = df_list[i][df_list[i]['Date'] == current_date]['Close'].values[0]
         current_close_price = df_list[i][df_list[i]['Date'] == reward_date]['Close'].values[0]
+        # print('Prev_close',previous_close_price,'Current_close',current_close_price)
         temp_asset_list[i] = temp_asset_list[i] * current_close_price / previous_close_price
+        # print(temp_asset_list[i])
 
     total_assets = sum(temp_asset_list)
-    for i in range(num_assets):
+    # print('total assets',total_assets)
+    for i in range(3):
         amount_change = changed_composition_rates[i] * total_assets - asset_list[i]
         if amount_change <= 0:
             temp_asset_list[i] = temp_asset_list[i] + amount_change
@@ -414,14 +365,6 @@ def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_
 
     return new_asset_list, sum(new_asset_list)
 
-def clean_trend_list(trend_list, date_range):
-    """Membersihkan trend_list untuk hanya menyertakan tanggal yang ada dalam date_range"""
-    cleaned_trend_list = []
-    for date in trend_list:
-        closest_date = min(date_range, key=lambda x: abs(x - date))
-        if closest_date not in cleaned_trend_list:
-            cleaned_trend_list.append(closest_date)
-    return sorted(cleaned_trend_list)
 
 def get_action(q_values: list) -> int:
     return np.argmax(q_values)

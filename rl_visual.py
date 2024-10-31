@@ -21,18 +21,15 @@ def plot_daily_nav(df_list: list, stocks: list, output_path: str, title: str, x_
     p.line(df_list[0][x_col], df_list[0]['Net'].values.tolist(), legend_label="RL rebalanced",
            line_color="black", line_width=2)
 
-    # Extended color palette untuk mengakomodasi lebih banyak aset
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5', '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5', '#393b79']
-
-    # Plot setiap saham dengan warnanya masing-masing
+    # Colors for different stocks
+    colors = ["red", "orange", "olivedrab", "blue", "purple"]
     for i, stock in enumerate(stocks):
         p.line(df_list[1][x_col], df_list[1][stock].values.tolist(), legend_label=stock,
-               line_color=colors[i], line_width=2)
+               line_color=colors[i % len(colors)], line_width=2)
 
     p.legend.location = "top_left"
-    p.legend.click_policy = "hide"  # Memungkinkan menyembunyikan line dengan klik
+    p.legend.click_policy = "hide"
     p.grid.grid_line_alpha = 0.3
-    
     output_file(output_path)
     show(p)
 

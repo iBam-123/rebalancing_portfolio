@@ -19,9 +19,8 @@ def get_algo_dataset(choose_set_num: int):
 
     if choose_set == run_set[0]:
         # Ganti dengan 11 stock codes portfolio 1
-        stocks =['AUD', 'CAD', 'CNY', 'EMLC', 'EUR',
-                'GBP', 'JPY', 'KRW', 'MYR', 'NZD',
-                'PLN', 'SGD', 'USD']
+        stocks =['AUD', 'CAD', 'CNY', 'EMLC', 'EUR', 
+                'GBP', 'INR', 'JPY', 'KRW', 'MYR', 'NZD', 'PLN', 'SGD', 'USD']
         for stock in stocks:
             df=pd.read_csv(f'data/rl/portfolio1/{stock}.csv', parse_dates=['Date'])
             df = df[df['Close'] > 0].reset_index(drop=True)
@@ -38,7 +37,7 @@ def get_algo_dataset(choose_set_num: int):
         stocks =['STOCK1', 'STOCK2', 'STOCK3', 'STOCK4', 'STOCK5',
                 'STOCK6', 'STOCK7', 'STOCK8', 'STOCK9', 'STOCK10',
                 'STOCK11', 'STOCK12', 'STOCK13', 'STOCK14', 'STOCK15',
-                'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19', 'STOCK20', 'STOCK21', ]
+                'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19']
         for stock in stocks:
             df=pd.read_csv(f'data/rl/portfolio2/{stock}.csv', parse_dates=['Date'])
             df = df[df['Close'] > 0].reset_index(drop=True)
@@ -52,41 +51,6 @@ def get_algo_dataset(choose_set_num: int):
         
     return df_list, date_range, trend_list, stocks
 
-def validate_portfolio_data(df_list, stocks):
-    """Validate portfolio data consistency"""
-    try:
-        # Check for same date range
-        start_dates = [df['Date'].min() for df in df_list]
-        end_dates = [df['Date'].max() for df in df_list]
-        
-        if len(set(start_dates)) > 1 or len(set(end_dates)) > 1:
-            print("Warning: Different date ranges detected")
-            print("Start dates:", start_dates)
-            print("End dates:", end_dates)
-            
-        # Check for missing values
-        for i, df in enumerate(df_list):
-            missing = df.isnull().sum()
-            if missing.sum() > 0:
-                print(f"Warning: Missing values in {stocks[i]}:")
-                print(missing[missing > 0])
-                
-        # Check for negative or zero prices
-        for i, df in enumerate(df_list):
-            invalid_prices = df[df['Close'] <= 0].shape[0]
-            if invalid_prices > 0:
-                print(f"Warning: {invalid_prices} invalid prices in {stocks[i]}")
-                
-        # Check for data frequency
-        for i, df in enumerate(df_list):
-            freq = df['Date'].diff().mode()[0]
-            if freq.days != 1:
-                print(f"Warning: Non-daily frequency detected in {stocks[i]}")
-                
-        return True
-    except Exception as e:
-        print(f"Error validating data: {e}")
-        return False
 
 def remove_uncommon_dates(df_list):
     date_range = []
