@@ -601,6 +601,7 @@ def get_initial_state(df_list, trend_list, date_range):
 
 def train_model(df_list, date_range, trend_list, stocks, args):
     # Initialize networks
+    #max_next_q = tf.zeros([config.batch_size, 1])
     config.batch_size = 32
     mainQN = Qnetwork(config.hidden_layer_size)
     targetQN = Qnetwork(config.hidden_layer_size)
@@ -661,53 +662,63 @@ def train_model(df_list, date_range, trend_list, stocks, args):
 
             # Training
             if len(replay_buffer) >= config.batch_size:
-                # Sample random minibatch
                 minibatch = random.sample(replay_buffer, config.batch_size)
                 
-                # Prepare batch data
                 states = np.array([norm_state(trans[0]) for trans in minibatch])
                 actions = np.array([trans[1] for trans in minibatch])
                 rewards = np.array([trans[2] for trans in minibatch])
                 next_states = np.array([norm_state(trans[3]) for trans in minibatch])
                 dones = np.array([trans[4] for trans in minibatch])
-              
-                # Calculate target Q-values
+
+                states = tf.cast(states, tf.float32)
+                actions = tf.cast(actions, tf.float32)
+                rewards = tf.cast(rewards, tf.float32)
+                next_states = tf.cast(next_states, tf.float32)
+                dones = tf.cast(dones, tf.float32)
+
                 next_q_values = targetQN(next_states)
-                max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])  
+                max_next_q = tf.reduce_max(next_q_values, axis=1)
+                print(config.batch_size)  # Pastikan nilainya 32
+                max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])
+
                 targets = rewards[:, None] + config.gamma * (1 - dones[:, None]) * max_next_q
-                
+
                 with tf.GradientTape() as tape:
-                    # Get Q-values for current states
+                    # Get current Q-values
                     current_q_values = mainQN(states)
                     
-                    # Get Q-values for next states from target network
+                    # Get next Q-values from target network
                     next_q_values = targetQN(next_states)
                     
                     # Calculate max Q-values for next states
                     max_next_q = tf.reduce_max(next_q_values, axis=1)
                     
-                    # Calculate target values
-                    # Reshape tensors to ensure compatible dimensions
-                    rewards = tf.reshape(rewards, [32, 1])  
-                    dones = tf.reshape(dones, [32, 1])
-                    max_next_q = tf.reshape(max_next_q, [32, 1])  
+                    # Ensure correct shape before calculating targets
+                    rewards = tf.reshape(rewards, [-1, 1])
+                    dones = tf.reshape(dones, [-1, 1])
+                    max_next_q = tf.reshape(max_next_q, [-1, 1])
+
+                    print("States shape:", tf.shape(states))
+                    print("Next states shape:", tf.shape(next_states))
+                    print("Next Q-values shape:", tf.shape(next_q_values))
+                    print("Max next Q shape:", tf.shape(max_next_q))
                     
-                    # Calculate targets
+                    # Calculate target Q-values
                     targets = rewards + (1 - dones) * config.gamma * max_next_q
-                    targets = tf.reshape(targets, [-1, 1])
                     
-                    # Get Q-values for taken actions
+                    # Get Q-values for actions taken
                     action_masks = tf.one_hot(actions, config.num_actions)
                     predicted_q_values = tf.reduce_sum(current_q_values * action_masks, axis=1, keepdims=True)
                     
                     # Calculate loss
                     loss = tf.reduce_mean(tf.square(targets - predicted_q_values))
-                
-                # Compute gradients and apply them
-                grads = tape.gradient(loss, mainQN.trainable_variables)
-                mainQN.optimizer.apply_gradients(zip(grads, mainQN.trainable_variables))
+
+                # Calculate and apply gradients
+                gradients = tape.gradient(loss, mainQN.trainable_variables)
+                mainQN.optimizer.apply_gradients(zip(gradients, mainQN.trainable_variables))
                 
                 losses.append(loss.numpy())
+
                 
             state = next_state
             portfolio_composition = new_portfolio_composition
@@ -1013,13 +1024,7 @@ if __name__ == "__main__":
         print(f"Date range: {date_range[0]} to {date_range[-1]}")
         print(f"Number of trading days: {len(date_range)}")
         
-        final_asset_list = train_model(
-          df_list=df_list,
-          date_range=date_range,
-          trend_list=trend_list,
-          stocks=stocks,
-          args=args
-    )
+        final_asset_list = train_model(df_list, date_range, trend_list, stocks, args)
         
         # Print final results
         print("\nTraining completed successfully!")
