@@ -13,8 +13,12 @@ import util
 import config
 import indicators
 import argparse
+import os
+from util.algo_dataset import get_algo_dataset
+import random
+from collections import deque
 
-tf.compat.v1.disable_eager_execution()
+#tf.compat.v1.disable_eager_execution()
 #arg_parser = argparse.ArgumentParser()
 #arg_parser.add_argument("--choose_set_num", required=True)
 #arg_parser.add_argument("--stocks", required=True)
@@ -22,7 +26,7 @@ tf.compat.v1.disable_eager_execution()
 #arg_parser.add_argument("--load", action='store_true')
 #arg_parser.add_argument("--full_swing", action='store_true')
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Train RL model with prediction")
+    parser = argparse.ArgumentParser(description="Train RL model")
     parser.add_argument("--portfolio", required=True, 
                        choices=['portfolio1', 'portfolio2'],
                        help="Select which portfolio to train")
@@ -38,13 +42,11 @@ def get_save_paths(portfolio: str, approach: str, predict: bool = False):
     """Get paths for saving results"""
     base_path = f'data/rl/{portfolio}'
     
-    # Determine subfolder based on approach and prediction
     if approach == 'gradual':
         subfolder = 'non_lagged' if predict else 'lagged'
     else:  # full_swing
         subfolder = 'fs_non_lagged' if predict else 'fs_lagged'
     
-    # Create folder if it doesn't exist
     folder_path = f'{base_path}/{subfolder}'
     os.makedirs(folder_path, exist_ok=True)
     
@@ -56,33 +58,46 @@ def get_save_paths(portfolio: str, approach: str, predict: bool = False):
 
 # Di bagian main atau training loop, setelah inisialisasi model
 args = parse_arguments()
-save_paths = get_save_paths(args)
+save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
 
-# Setelah setiap episode training atau pada interval tertentu
-if episode % save_interval == 0:
-    # Save model weights
-    saver.save(sess, save_paths['model'])
+# Load dataset
+df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
+
+# Sekarang kita bisa menggunakan trend_list
+max_epLength = len(trend_list) - 1
+
+def save_training_results(sess, saver, episode, date_range, portfolio_values, 
+                         passive_values, stocks, save_paths):
+    """
+    Save model and results at specified intervals
+    """
+    if episode % TRAINING_CONFIG['save_interval'] == 0:
+        # Save model weights
+        saver.save(sess, save_paths['model'])
+        
+        # Save daily NAV
+        nav_df = pd.DataFrame({
+            'Date': date_range,
+            'Net': portfolio_values
+        })
+        nav_df.to_csv(save_paths['daily_nav'], index=False)
+        
+        # Save passive NAV
+        passive_df = pd.DataFrame({
+            'Date': date_range,
+            **{stock: values for stock, values in zip(stocks, passive_values)}
+        })
+        passive_df.to_csv(save_paths['passive_nav'], index=False)
+
+def get_epsilon(total_steps):
+    """Calculate epsilon for epsilon-greedy policy"""
+    e_rate = TRAINING_CONFIG['start_e']
+    step_drop = (TRAINING_CONFIG['start_e'] - TRAINING_CONFIG['end_e']) / TRAINING_CONFIG['annealing_steps']
     
-    # Save daily NAV
-    nav_df = pd.DataFrame({
-        'Date': date_range,
-        'Net': portfolio_values
-    })
-    nav_df.to_csv(save_paths['daily_nav'], index=False)
-    
-    # Save passive NAV
-    passive_df = pd.DataFrame({
-        'Date': date_range,
-        **{stock: values for stock, values in zip(stocks, passive_values)}
-    })
-    passive_df.to_csv(save_paths['passive_nav'], index=False)
+    return max(TRAINING_CONFIG['end_e'], 
+              TRAINING_CONFIG['start_e'] - (step_drop * total_steps))
 
-run_set = ['portfolio1', 'portfolio2']
-stocks = args.stocks.split(',')
-choose_set_num = int(args.choose_set_num)
-load_model = args.load if args.load else False
-
-path = args.path.replace(',', '/')
+#parameter
 weight_decay_beta = float('10e-9')
 
 price_period = 30
@@ -91,8 +106,6 @@ risk_level = 1
 save_rl_data = True
 save_passive = True
 save_algo_data = True
-df_list, date_range, trend_list, _ = util.get_algo_dataset(choose_set_num)
-max_ep_length = len(trend_list)
 
 batch_size = 32
 update_freq = 10
@@ -109,49 +122,70 @@ tau = 0.0005
 num_actions = 4
 state_dimension = 5
 
-df_list, date_range, trend_list, _ = util.get_algo_dataset(choose_set_num)
-max_ep_length = len(trend_list)
 
 # Set the rate of random action decrease.
 e_rate = start_e
 step_drop = (start_e - end_e) / annealing_steps
 
-
-class Qnetwork():
+class Qnetwork(tf.keras.Model):
     def __init__(self, H):
+        super(Qnetwork, self).__init__()
+        
+        # Define layers
+        self.dense1 = tf.keras.layers.Dense(H, 
+                                          activation='relu',
+                                          kernel_initializer=tf.keras.initializers.RandomUniform(0, 1),
+                                          bias_initializer=tf.keras.initializers.Constant(0.1))
+        
+        self.dense2 = tf.keras.layers.Dense(num_actions,
+                                          kernel_initializer=tf.keras.initializers.RandomUniform(0, 1),
+                                          bias_initializer=tf.keras.initializers.Constant(0.1))
+
+    def call(self, x):
+        # Forward pass
         sum_regularization = 0
-        self.x = tf.compat.v1.placeholder(tf.float32, [1, state_dimension])
-        self.W0 = tf.Variable(tf.random.uniform([state_dimension, H], 0, 1))
-        self.b0 = tf.Variable(tf.constant(0.1, shape=[H]))
+        
+        # First layer
+        hidden = self.dense1(x)
+        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.dense1.kernel)
+        
+        # Output layer
+        q_values = self.dense2(hidden)
+        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.dense2.kernel)
+        
+        return q_values, sum_regularization
 
-        self.y_hidden = tf.nn.relu(tf.matmul(self.x, self.W0) + self.b0)
-        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.W0)
+    def get_q_values(self, state):
+        """Get Q-values for a given state"""
+        state = tf.convert_to_tensor(state, dtype=tf.float32)
+        q_values, _ = self(state)
+        return q_values
 
-        self.W1 = tf.Variable(tf.random.uniform([H, num_actions], 0, 1))
-        self.b1 = tf.Variable(tf.constant(0.1, shape=[num_actions]))
-        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.W1)
-        # q out
-        self.q_values = tf.matmul(self.y_hidden, self.W1) + self.b1
-        # predict
-        self.best_action = tf.argmax(self.q_values, 1)
-
-        # next q
-        self.target = tf.compat.v1.placeholder(tf.float32, [1, num_actions])
-        self.loss = tf.reduce_sum(tf.square(self.target - self.q_values) + sum_regularization)
-        self.update = tf.compat.v1.train.AdamOptimizer(learning_rate=0.001).minimize(self.loss)
-
-
+    def train_step(self, state, target):
+        """Single training step"""
+        state = tf.convert_to_tensor(state, dtype=tf.float32)
+        target = tf.convert_to_tensor(target, dtype=tf.float32)
+        
+        with tf.GradientTape() as tape:
+            q_values, sum_regularization = self(state)
+            loss = tf.reduce_sum(tf.square(target - q_values) + sum_regularization)
+        
+        # Get gradients and apply them
+        gradients = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+        
+        return loss
 
 def norm_state(state):
     temp = deepcopy(state)
-    return np.reshape(np.hstack(temp), (1, state_dimension))
+    return np.reshape(np.hstack(temp), (1, config.state_dimension))
 
 
 def process_action(action, portfolio_composition):
     new_portfolio_composition = deepcopy(portfolio_composition)
     num_assets = len(portfolio_composition)
     
-    if args.full_swing:
+    if args.approach == 'full_swing':
         ####################### Full switch ##############################
         if action == 0:  # High risk focus
             high_risk_portion = num_assets // 3
@@ -186,7 +220,6 @@ def process_action(action, portfolio_composition):
                     new_portfolio_composition[i] = 0.2 / low_risk_portion
                 else:
                     new_portfolio_composition[i] = 0.7 / (num_assets - 2 * low_risk_portion)
-    
     else:
         ###################### Gradual ##############################
         step = 0.1
@@ -236,45 +269,97 @@ def process_action(action, portfolio_composition):
     
     return new_portfolio_composition
 
+#pertanyakan
 def adjust_portfolio_gradual(portfolio, start_idx, end_idx, step):
     """Helper function untuk menyesuaikan alokasi portfolio secara gradual"""
-    for i in range(start_idx, end_idx):
-        portfolio[i] += step
-    for i in range(len(portfolio)):
-        if i < start_idx or i >= end_idx:
-            portfolio[i] -= step / (len(portfolio) - (end_idx - start_idx))
+    new_portfolio = portfolio.copy()
+    num_assets = len(portfolio)
+    
+    # Hitung jumlah asset yang akan ditingkatkan
+    num_increased_assets = end_idx - start_idx
+    
+    # Hitung jumlah asset yang akan dikurangi
+    num_decreased_assets = num_assets - num_increased_assets
+    
+    if num_decreased_assets <= 0:
+        return new_portfolio
+    
+    # Hitung pengurangan per asset untuk asset yang dikurangi
+    decrease_per_asset = (step * num_increased_assets) / num_decreased_assets
+    
+    # Sesuaikan alokasi
+    for i in range(num_assets):
+        if start_idx <= i < end_idx:
+            # Tingkatkan alokasi untuk asset dalam range
+            new_value = new_portfolio[i] + step
+            # Pastikan tidak melebihi batas maksimum (80%)
+            new_portfolio[i] = min(0.8, new_value)
+        else:
+            # Kurangi alokasi untuk asset lainnya
+            new_value = new_portfolio[i] - decrease_per_asset
+            # Pastikan tidak kurang dari batas minimum (10%)
+            new_portfolio[i] = max(0.1, new_value)
+    
+    # Normalisasi untuk memastikan total = 1
+    total = sum(new_portfolio)
+    if total != 1.0:
+        new_portfolio = [x/total for x in new_portfolio]
+    
+    # Validasi final
+    for i in range(num_assets):
+        # Pastikan semua alokasi dalam range yang diizinkan
+        if new_portfolio[i] < 0.1:
+            new_portfolio[i] = 0.1
+        elif new_portfolio[i] > 0.8:
+            new_portfolio[i] = 0.8
+    
+    # Normalisasi final
+    total = sum(new_portfolio)
+    new_portfolio = [x/total for x in new_portfolio]
+    
+    return new_portfolio
 
 
 def get_next_state(current_index, trend_list, date_range, df_list):
+    if current_index + 1 >= len(trend_list):
+        raise ValueError("Current index is out of range for trend_list")
+    
     date = trend_list[current_index + 1]
-    date_idx = [i for i, cur_date in enumerate(date_range) if date == cur_date][0]
+    date_indices = [i for i, cur_date in enumerate(date_range) if date == cur_date]
+    
+    if not date_indices:
+        raise ValueError(f"Date {date} not found in date_range")
+    
+    date_idx = date_indices[0]
     state_ = ()
 
-    for i in range(2):
-        # Check price data for state. Get the price_period num of days price before period
+    for i in range(2):  # Assuming you're using 2 assets
         price_list = []
-        if date_idx - price_period >= 0:
-            price_dates = date_range[date_idx - price_period:date_idx]
+        if date_idx - config.price_period >= 0:
+            price_dates = date_range[date_idx - config.price_period:date_idx]
         else:
             price_dates = date_range[0:date_idx]
-            for _ in range(price_period - date_idx):
-                price_list.append(0)
+            price_list.extend([0] * (config.price_period - date_idx))
 
         for date in price_dates:
-            price_list.append(df_list[i][df_list[i]['Date'] == date]['Close'].values[0])
+            price = df_list[i][df_list[i]['Date'] == date]['Close'].values
+            if len(price) == 0:
+                raise ValueError(f"No price data for asset {i} on date {date}")
+            price_list.append(price[0])
 
         df = pd.DataFrame({'Close': price_list})
         df['EMA'] = indicators.exponential_moving_avg(df, window_size=6, center=False)
         df['MACD_Line'] = indicators.macd_line(df, ema1_window_size=3, ema2_window_size=6, center=False)
-        df['MACD_Signal'] = indicators.macd_signal(df, window_size=6, ema1_window_size=3, ema2_window_size=6,
-                                                   center=False)
+        df['MACD_Signal'] = indicators.macd_signal(df, window_size=6, ema1_window_size=3, ema2_window_size=6, center=False)
+
         ema_price = util.z_score_normalization(df.iloc[-1]['EMA'], df['EMA'].tolist())
-        macd_line = df['MACD_Line']
-        macd_signal = df['MACD_Signal']
-        macd = [macd_line.iloc[i] - macd_signal.iloc[i] for i in range(len(macd_line))]
-        macd = util.scale(macd[-1], macd)
-        if (math.isnan(ema_price) or math.isnan(macd)):
+        macd = df['MACD_Line'].iloc[-1] - df['MACD_Signal'].iloc[-1]
+        macd = util.scale(macd, df['MACD_Line'] - df['MACD_Signal'])
+
+        if math.isnan(ema_price) or math.isnan(macd):
             print(f'nan encountered: ema = {ema_price}, macd = {macd}')
+            ema_price = 0 if math.isnan(ema_price) else ema_price
+            macd = 0 if math.isnan(macd) else macd
 
         state_ += (ema_price, macd)
 
@@ -286,102 +371,122 @@ def get_next_state(current_index, trend_list, date_range, df_list):
     state_ += (last_date_delta,)
     return state_
 
-
+#tanyakan
 def get_predicted_indicator_df(df, price_list, scaler, model):
+    """
+    Generate predicted indicators using LSTM model.
+    
+    Args:
+    df (pd.DataFrame): DataFrame containing historical price data
+    price_list (list): List of historical prices
+    scaler (sklearn.preprocessing.MinMaxScaler): Scaler used for normalization
+    model (tensorflow.keras.Model): Trained LSTM model for prediction
+    
+    Returns:
+    pd.DataFrame: DataFrame with predicted indicators
+    """
+    # Scale the input data
     scaled_df = scaler.fit_transform(df)
+    
+    # Prepare data for LSTM prediction
     temp_data1 = []
     # predict 3 days after
     for j in range(3):
         temp_data2 = []
         # lookback period of 7
         for k in range(7):
-            temp_data3 = scaled_df[-j - k - 1].tolist()[1:]
+            temp_data3 = scaled_df[-j - k - 1].tolist()[1:]  # Exclude the first column (Close price)
             temp_data2.append(temp_data3)
         temp_data1.append(temp_data2)
     temp_data1 = np.array(temp_data1)
 
+    # Make predictions using the LSTM model
     prediction = model.predict(temp_data1)
+    
+    # Combine predictions with other features
     temp_data = np.concatenate((prediction, temp_data1[:, 0, :]), axis=1)
+    
+    # Inverse transform to get actual price predictions
     pred_close = scaler.inverse_transform(temp_data)[:, 0]
-    # print(pred_close, price_list[-1])
+    
+    # Append predicted prices to the price list
     for close in pred_close:
         price_list.append(close)
+    
+    # Create a new DataFrame with the extended price list
     df = pd.DataFrame({'Close': price_list})
+    
+    # Calculate technical indicators
     df['EMA'] = indicators.exponential_moving_avg(df, window_size=6, center=True)
     df['MACD_Line'] = indicators.macd_line(df, ema1_window_size=3, ema2_window_size=6, center=True)
     df['MACD_Signal'] = indicators.macd_signal(df, window_size=6, ema1_window_size=3, ema2_window_size=6, center=True)
-    # print(df.iloc[3:-3])
+    
+    # Return the DataFrame, excluding the first 3 and last 3 rows
+    # This is done to remove potential edge effects from the centered indicators
     return df.iloc[3:-3]
 
 
 def get_reward(asset_list, action, current_index, trend_list, date_range, 
                portfolio_composition, df_list):
     """Calculate reward for multi-asset portfolio"""
-    num_assets = len(asset_list)
     reward_period = 15
     commission_rate = 1.0/800
     
     date = trend_list[current_index]
     date_idx = date_range.index(date)
-    # Check price data for state. Get the price_period num of days price before period
+    
     if date_idx + reward_period < len(date_range):
         reward_date = date_range[date_idx + reward_period]
     else:
-        # Not checked in gradual approach
         reward_date = date_range[-1]
 
-    passive_asset_sum, _ = get_reward_asset_sum(new_asset_list, portfolio_composition, date, reward_date,
-                                                commisson_rate)
+    passive_asset_sum, _ = get_reward_asset_sum(asset_list, portfolio_composition, 
+                                              date, reward_date, commission_rate, df_list)
 
-    if args.full_swing:
-        # #### Full swing #############
+    if args.approach == 'full_swing':
         changed_composition_rates = process_action(action, portfolio_composition)
-        changed_asset_sum, _ = get_reward_asset_sum(new_asset_list, changed_composition_rates, date, reward_date,
-                                                    commisson_rate)
+        changed_asset_sum, _ = get_reward_asset_sum(asset_list, changed_composition_rates, 
+                                                  date, reward_date, commission_rate, df_list)
 
         if changed_asset_sum - passive_asset_sum == 0 or passive_asset_sum == 0:
-            new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, trend_list, current_index,
-                                                          date_range)
+            new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
+                                                        trend_list, current_index, date_range, df_list)
             return 0, changed_composition_rates, new_asset_list
-        new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, trend_list, current_index,
-                                                      date_range)
-        # ########################
+            
+        new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
+                                                    trend_list, current_index, date_range, df_list)
 
     else:
-        # ####### Gradual ##################
         changed_asset_sum = 0
         changed_composition_rates = portfolio_composition
         changed_asset_list = deepcopy(asset_list)
+        
         for i, cur_date in enumerate(date_range[date_idx:date_idx + reward_period]):
             if cur_date != trend_list[current_index + 1] and i < 3:
-                # Composition rate 1 day after
                 changed_composition_rates = process_action(action, portfolio_composition)
-                changed_asset_sum, changed_asset_list = get_reward_asset_sum(changed_asset_list,
-                                                                             changed_composition_rates, cur_date,
-                                                                             date_range[date_idx + i + 1],
-                                                                             commisson_rate)
-                # print('From: ',cur_date,' to ',date_range[date_idx+i+1])
+                changed_asset_sum, changed_asset_list = get_reward_asset_sum(
+                    changed_asset_list,
+                    changed_composition_rates, 
+                    cur_date,
+                    date_range[date_idx + i + 1],
+                    commission_rate,
+                    df_list
+                )
             else:
                 date = cur_date
                 break
+                
         if changed_asset_sum - passive_asset_sum == 0 or passive_asset_sum == 0:
-            new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, trend_list, current_index,
-                                                          date_range)
+            new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
+                                                        trend_list, current_index, date_range, df_list)
             return 0, changed_composition_rates, new_asset_list
+            
         new_asset_list, nav_reward = changed_asset_list, changed_asset_sum
 
-        ##########################
-
     trend_list_len = len(trend_list)
-    # scale to 0.5-1 depending on trend position
     time_scaling_factor = 0.5 * (trend_list_len - current_index) / trend_list_len + 0.5
-    # print('Asset difference: ', changed_asset_sum - passive_asset_sum)
-    # print('old portfolio: ', portfolio_composition, 'New: ', changed_composition_rates)
-    # print('Date: ', date, 'Change:', (changed_asset_sum - passive_asset_sum) / passive_asset_sum  * 100)
-    # print('Changed sum: ', changed_asset_sum, 'Passive sum: ', passive_asset_sum)
     reward = (changed_asset_sum - passive_asset_sum) / passive_asset_sum * time_scaling_factor
-    # print('Reward: ', reward)
-    # print('nav Reward: ', nav_reward/10000000)
+    
     return reward + nav_reward / 10000000, changed_composition_rates, new_asset_list
 
 
@@ -405,279 +510,409 @@ def get_reward_asset_sum(asset_list, composition, start_date, end_date, commissi
     return sum(new_asset_list), new_asset_list
 
 
-def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, final_nav=False,
-                     commisson_rate=1.0 / 800):
+def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, df_list, 
+                    final_nav=False, commission_rate=1.0/800):
     new_asset_list = deepcopy(asset_list)
+    
     if final_nav:
-        # Update for end of date
-        for j in range(3):
-            # Update asset values
+        for j in range(len(df_list)):
             previous_close_price = df_list[j][df_list[j]['Date'] == trend_list[-1]]['Close'].values[0]
             current_close_price = df_list[j][df_list[j]['Date'] == date_range[-1]]['Close'].values[0]
-            new_asset_list[j] = new_asset_list[j] * current_close_price / previous_close_price
+            new_asset_list[j] *= current_close_price / previous_close_price
         return new_asset_list, sum(new_asset_list)
 
-    # start of training at trend_list idx 10
-    if index == 10 - 1:
-        prev_date = date_range[0]
-    else:
-        prev_date = trend_list[index - 1]
+    prev_date = date_range[0] if index == 9 else trend_list[index - 1]
     date = trend_list[index]
 
+
     # Update asset values by passive market movement
-    for j in range(3):
+    for j in range(len(df_list)):
         previous_close_price = df_list[j][df_list[j]['Date'] == prev_date]['Close'].values[0]
         current_close_price = df_list[j][df_list[j]['Date'] == date]['Close'].values[0]
         new_asset_list[j] = new_asset_list[j] * current_close_price / previous_close_price
+    
     total_assets = sum(new_asset_list)
 
     # Update asset values by portfolio adjustment
-    for j in range(3):
+    for j in range(len(df_list)):
         amount_change = portfolio_composition[j] * total_assets - new_asset_list[j]
-        # Reduce composition
         if amount_change <= 0:
             new_asset_list[j] = new_asset_list[j] + amount_change
-        # Increase composition. Incur buy and sell commission
         else:
-            new_asset_list[j] = new_asset_list[j] + amount_change * (1 - commisson_rate) ** 2
+            new_asset_list[j] = new_asset_list[j] + amount_change * (1 - commission_rate) ** 2
 
     return new_asset_list, sum(new_asset_list)
 
+def train_model(df_list, date_range, trend_list, stocks, args):
+    """
+    Train the RL model
+    """
+    # Initialize model and optimizer
+    mainQN = Qnetwork(config.hidden_layer_size)
+    targetQN = Qnetwork(config.hidden_layer_size)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
+    
+    # Initialize portfolio
+    num_assets = len(stocks)
+    portfolio_composition = [1.0/num_assets] * num_assets
+    asset_list = [10000/num_assets] * num_assets
+    
+    # Initialize replay buffer
+    replay_buffer = deque(maxlen=config.buffer_size)
+    
+    # Training variables
+    epsilon = config.initial_exploration
+    best_reward = float('-inf')
+    
+    # Checkpoint setup for saving model
+    checkpoint = tf.train.Checkpoint(model=mainQN)
+    manager = tf.train.CheckpointManager(
+        checkpoint, 
+        directory=f'./checkpoints/{args.portfolio}/{args.approach}',
+        max_to_keep=3
+    )
 
-def get_action(q_values: list) -> int:
-    return np.argmax(q_values)
+    for episode in range(num_episodes):
+        current_index = 0  # Start from the first trend
+        state = get_next_state(current_index-1, trend_list, date_range, df_list)
+        episode_reward = 0
+        
+        while current_index < len(trend_list)-1:
+            # Get action
+            action = get_action(state, mainQN, epsilon)
+            
+            # Process action
+            new_portfolio_composition = process_action(action, portfolio_composition)
+            
+            # Get reward
+            reward, new_asset_list = get_reward(
+                asset_list, action, current_index, trend_list,
+                date_range, new_portfolio_composition, df_list
+            )
+            
+            # Get next state
+            next_state = get_next_state(current_index, trend_list, date_range, df_list)
+            
+            # Store transition
+            replay_buffer.append((
+                state, action, reward, next_state,
+                current_index >= len(trend_list)-2
+            ))
+            
+            # Train if we have enough samples
+            if len(replay_buffer) >= config.batch_size:
+                # Sample minibatch
+                minibatch = random.sample(replay_buffer, config.batch_size)
+                
+                # Prepare batch data
+                states = np.array([norm_state(trans[0]) for trans in minibatch])
+                actions = np.array([trans[1] for trans in minibatch])
+                rewards = np.array([trans[2] for trans in minibatch])
+                next_states = np.array([norm_state(trans[3]) for trans in minibatch])
+                dones = np.array([trans[4] for trans in minibatch])
+                
+                with tf.GradientTape() as tape:
+                    # Current Q values
+                    q_values = mainQN(states)
+                    current_q = tf.reduce_sum(
+                        q_values * tf.one_hot(actions, config.num_actions),
+                        axis=1
+                    )
+                    
+                    # Target Q values
+                    next_q = targetQN(next_states)
+                    max_next_q = tf.reduce_max(next_q, axis=1)
+                    target_q = rewards + config.gamma * (1 - dones) * max_next_q
+                    
+                    # Compute loss
+                    loss = tf.reduce_mean(tf.square(target_q - current_q))
+                
+                # Apply gradients
+                grads = tape.gradient(loss, mainQN.trainable_variables)
+                optimizer.apply_gradients(zip(grads, mainQN.trainable_variables))
+            
+            # Update state and portfolio
+            state = next_state
+            portfolio_composition = new_portfolio_composition
+            asset_list = new_asset_list
+            episode_reward += reward
+            current_index += 1
+            
+            # Update epsilon
+            if epsilon > config.final_exploration:
+                epsilon -= config.exploration_decay
+        
+        # End of episode updates
+        if episode % target_update_freq == 0:
+            targetQN.set_weights(mainQN.get_weights())
+        
+        # Save if we have a new best reward
+        if episode_reward > best_reward:
+            best_reward = episode_reward
+            manager.save()
+        
+        # Log progress
+        if episode % log_freq == 0:
+            print(f"Episode {episode}")
+            print(f"Epsilon: {epsilon:.4f}")
+            print(f"Episode Reward: {episode_reward:.4f}")
+            print(f"Portfolio Value: {sum(asset_list):.2f}")
+            print("------------------------")
+    
+    # Save final results
+    save_results(
+        date_range=date_range,
+        asset_list=asset_list,
+        portfolio=args.portfolio,
+        approach=args.approach,
+        predict=args.predict
+    )
+    
+    return asset_list
 
+def save_results(date_range, asset_list, portfolio, approach, predict):
+    """Save training results"""
+    # Determine save path
+    base_path = f'data/rl/{portfolio}'
+    subfolder = 'non_lagged' if predict else 'lagged'
+    if approach == 'full_swing':
+        subfolder = f'fs_{subfolder}'
+    
+    save_path = f'{base_path}/{subfolder}'
+    os.makedirs(save_path, exist_ok=True)
+    
+    # Save NAV data
+    df_nav = pd.DataFrame({
+        'Date': date_range,
+        'Net': asset_list
+    })
+    df_nav.to_csv(f'{save_path}/daily_nav.csv', index=False)
 
-main_QN = Qnetwork(h_size)
-saver = tf.compat.v1.train.Saver()
-# Make a path for model to be saved in.
-Path(path).mkdir(parents=True, exist_ok=True)
+def calculate_daily_nav(portfolio_list, trend_list, date_range, df_list):
+    """Calculate daily NAV for the portfolio"""
+    nav_dict = {'Date': [], 'Net': []}
+    current_portfolio = portfolio_list[0]
+    current_assets = [1000000/len(df_list)] * len(df_list)
+    
+    trend_idx = 0
+    for date in date_range:
+        if trend_idx < len(trend_list) and date == trend_list[trend_idx]:
+            current_portfolio = portfolio_list[trend_idx]
+            trend_idx += 1
+            
+        # Update asset values
+        for i, df in enumerate(df_list):
+            if i == 0:  # Only add date once
+                nav_dict['Date'].append(date)
+            
+            current_price = df[df['Date'] == date]['Close'].values[0]
+            current_assets[i] *= current_price / df[df['Date'] == date]['Close'].values[0]
+            
+        nav_dict['Net'].append(sum(current_assets))
+        
+    return pd.DataFrame(nav_dict)
 
-with tf.compat.v1.Session() as sess:
-    if load_model:
-        print('Loading model')
-        ckpt = tf.train.get_checkpoint_state(path)
-        print(ckpt.model_checkpoint_path)
-        saver.restore(sess, ckpt.model_checkpoint_path)
-
-        ep_reward = 0
-        start = 10
-        end = len(trend_list) - 1
-        state = get_next_state(start - 1, trend_list, date_range, df_list)
-        base_rate_list = []
-        portfolio_composition = [0.1 + 0.3, 0.1 + 0.2, 0.1 + 0.2]
-        portfolio_composition_list = []
-        reward_list = []
-        asset_list = [100000, 100000, 100000]
-        # prev_action = ACTION_CLOSE
-        for i in range(start, end):
-            # print(norm_state(s))
-            qv = sess.run(main_QN.q_values, feed_dict={main_QN.x: norm_state(state)})
-            # Remove the extra [] for action
-            action = get_action(qv)
-            state_ = get_next_state(i, trend_list, date_range, df_list)
-            step_reward, portfolio_composition, asset_list = get_reward(asset_list, action, i, trend_list, date_range,
-                                                                        portfolio_composition, df_list)
-            reward_list.append(step_reward)
-            portfolio_composition_list.append(portfolio_composition)
-            state = state_
-        nav, asset_list = calc_actions_nav(asset_list, portfolio_composition, trend_list, i, date_range, final_nav=True)
-        print(nav)
-
-        nav_daily_dates_list = []
-        nav_daily_composition_list = [[], [], []]
-        nav_daily_net_list = []
-        daily_price_list = []
-        commisson_rate = 1.0 / 800
-        asset_list = [100000, 100000, 100000]
-        changed = []
+def calculate_passive_nav(date_range, df_list):
+    """Calculate passive NAV (buy and hold strategy)"""
+    nav_dict = {'Date': date_range}
+    initial_investment = 1000000 / len(df_list)
+    
+    for i, df in enumerate(df_list):
+        asset_values = []
+        initial_price = df[df['Date'] == date_range[0]]['Close'].values[0]
+        
         for date in date_range:
-            changed.append(date in trend_list[:-1])
-        nav_daily_adjust_list = [change for change in changed]
-        j = 0
-        last_trade_date = date_range[0]
-        for date in date_range:
-            # Generate daily NAV value for visualisation
-            current_nav_list = []
-            if date in trend_list[start:-1]:
-                # Update asset composition
-                for i in range(3):
-                    previous_close_price = df_list[i][df_list[i]['Date'] == last_trade_date]['Close'].values[0]
-                    current_close_price = df_list[i][df_list[i]['Date'] == date]['Close'].values[0]
-                    asset_list[i] = asset_list[i] * current_close_price / previous_close_price
-                total_assets = sum(asset_list)
+            current_price = df[df['Date'] == date]['Close'].values[0]
+            asset_value = initial_investment * (current_price / initial_price)
+            asset_values.append(asset_value)
+            
+        nav_dict[f'Asset_{i+1}'] = asset_values
+        
+    return pd.DataFrame(nav_dict)
 
-                # Rebalance portfolio
-                for i in range(3):
-                    amount_change = portfolio_composition_list[j][i] * total_assets - asset_list[i]
-                    # Reduce composition
-                    if amount_change <= 0:
-                        asset_list[i] = asset_list[i] + amount_change
-                    # Increase composition. Incur buy and sell commission
-                    else:
-                        asset_list[i] = asset_list[i] + amount_change * (1 - commisson_rate) ** 2
-                    current_nav_list.append(asset_list[i])
-                last_trade_date = date
-                j += 1
-            else:
-                for i in range(3):
-                    previous_close_price = df_list[i][df_list[i]['Date'] == last_trade_date]['Close'].values[0]
-                    current_close_price = df_list[i][df_list[i]['Date'] == date]['Close'].values[0]
-                    current_nav_list.append(asset_list[i] * current_close_price / previous_close_price)
+def get_action(state, mainQN, epsilon=0.0):
+    """
+    Memilih action menggunakan epsilon-greedy policy
+    
+    Args:
+        state: Current state
+        mainQN: Main Q-Network
+        epsilon: Exploration rate (default 0.0 for pure exploitation)
+    
+    Returns:
+        action: Selected action index
+    """
+    # Exploration: memilih action secara random
+    if np.random.random() < epsilon:
+        return np.random.randint(0, config.num_actions)
+    
+    # Exploitation: memilih action dengan Q-value tertinggi
+    state_tensor = norm_state(state)
+    q_values = mainQN(state_tensor)
+    return np.argmax(q_values[0])
 
-            nav_daily_dates_list.append(date)
-            for i in range(3):
-                nav_daily_composition_list[i].append(current_nav_list[i])
-            daily_price_list.append(sum(current_nav_list) / 300000 * 100)
-            nav_daily_net_list.append(sum(current_nav_list))
-
-        daily_price_df = pd.DataFrame({'Date': nav_daily_dates_list, 'Close': daily_price_list})
-
-        daily_df = pd.DataFrame({'Date': nav_daily_dates_list, \
-                                 stocks[0]: nav_daily_composition_list[0], \
-                                 stocks[1]: nav_daily_composition_list[1], \
-                                 stocks[2]: nav_daily_composition_list[2], \
-                                 'Net': nav_daily_net_list, \
-                                 'Adjusted': nav_daily_adjust_list})
-
-        # Generate quarterly NAV returns for visualisation
-        quarterly_df = util.cal_fitness_with_quarterly_returns(daily_df, [], price_col='Net')
-
-        # Generate passive NAV returns for comparison (buy and hold)
-        # assets are all 300000 to be able to compare to algo
-        asset_list = [300000, 300000, 300000]
-        last_date = nav_daily_dates_list[0]
-        passive_nav_daily_composition_list = [[], [], []]
-        for date in nav_daily_dates_list:
-            for i in range(len(stocks)):
-                previous_close_price = df_list[i][df_list[i]['Date'] == last_date]['Close'].values[0]
-                current_close_price = df_list[i][df_list[i]['Date'] == date]['Close'].values[0]
-                asset_list[i] = asset_list[i] * current_close_price / previous_close_price
-                passive_nav_daily_composition_list[i].append(asset_list[i])
-            last_date = date
-
-        passive_daily_df = pd.DataFrame({'Date': nav_daily_dates_list, \
-                                         stocks[0]: passive_nav_daily_composition_list[0], \
-                                         stocks[1]: passive_nav_daily_composition_list[1], \
-                                         stocks[2]: passive_nav_daily_composition_list[2]})
-
-        passive_quarterly_df = pd.DataFrame()
-        for i in range(len(stocks)):
-            if i == 0:
-                passive_quarterly_df = util.cal_fitness_with_quarterly_returns(passive_daily_df, [],
-                                                                               price_col=stocks[i])
-                passive_quarterly_df = passive_quarterly_df.rename(columns={"quarterly_return": stocks[i]})
-            else:
-                passive_quarterly_df[stocks[i]] = \
-                util.cal_fitness_with_quarterly_returns(passive_daily_df, [], price_col=stocks[i])['quarterly_return']
-        # print(passive_quarterly_df)
-
-        # Print some quarterly difference statistics
-        for symbol in stocks:
-            difference = quarterly_df['quarterly_return'].values - passive_quarterly_df[symbol].values
-            # print('Stock {}: {}'.format(symbol, difference))
-            print('Stock {} total return difference = {}'.format(symbol, sum(difference)))
-
-        for symbol in stocks:
-            symbol_cvar = abs(util.cvar_percent(passive_daily_df, len(passive_daily_df) - 1, len(passive_daily_df) - 1,
-                                                price_col=symbol))
-            print('Stock cvar {}: {}'.format(symbol, symbol_cvar))
-            # print('Stock {} cvar difference = {}'.format(symbol, cvar - symbol_cvar))
-
-        Path(path).mkdir(parents=True, exist_ok=True)
-
-        if save_passive:
-            passive_daily_df.to_csv(f'{path}/passive_daily_nav.csv')
-            passive_quarterly_df.to_csv(f'{path}/passive_quarterly_nav_return.csv')
-            print('Passive data saved for {}'.format(run_set[choose_set_num]))
-
-        if save_rl_data:
-            daily_df.to_csv(f'{path}/daily_nav.csv')
-            quarterly_df.to_csv(f'{path}/quarterly_nav_return.csv')
-            daily_price_df.to_csv(f'{path}/daily_price.csv')
-            print('Data saved for {}'.format(run_set[choose_set_num]))
-        sys.exit(0)
-
-    sess.run(tf.compat.v1.global_variables_initializer())
-
-    total_steps = 1000
-    reward_list = []
-    position_idx = 0
-    portfolio_composition = [0.1, 0.1, 0.1 + 0.7]
-    ep_reward = 0
-    ep_10_reward = 0
-    nav = 0
-    nav_10_eps = 0
-    for j in tqdm(range(num_episodes)):
-        print(f'Total Steps taken: {total_steps}')
-        # reward_list.append(ep_reward / ((i % 10) + 1))
-        if j % 10 == 0:
-            print(
-                f"Episode {j}, Total Steps: {total_steps} Average Reward {ep_10_reward / 10}, Average Nav {nav_10_eps / 10}")
-            print(f'exploration rate: {e_rate}')
-            ep_10_reward = 0
-            nav_10_eps = 0
-        # episode_buffer = experience_buffer()
-
-        start = 10
-        position_idx = start
-        state = get_next_state(position_idx - 1, trend_list, date_range, df_list)
-        portfolio_composition = [0.1, 0.1, 0.8]
-        portfolio_composition_list = []
-        reward_list = []
-        nav = 0
-        ep_reward = 0
-        asset_list = [100000, 100000, 100000]
-        while position_idx < max_ep_length - 1:
-            action, q_values = sess.run([main_QN.best_action, main_QN.q_values],
-                                        feed_dict={main_QN.x: norm_state(state)})
-            # Remove the extra [] for action
-            action = action[0]
-            # Explore
-            if np.random.rand(1) < e_rate or total_steps < pre_train_steps:
+def main():
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Setup paths and load data
+    save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
+    df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
+    
+    # Initialize networks
+    h_size = hidden_layer_size
+    mainQN = Qnetwork(h_size)
+    targetQN = Qnetwork(h_size)
+    mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    
+    # Initialize replay buffer
+    replay_buffer = deque(maxlen=buffer_size)
+    
+    # Initialize portfolio
+    num_assets = len(stocks)
+    portfolio_composition = [1.0/num_assets] * num_assets  # Equal weight initially
+    asset_list = [10000/num_assets] * num_assets  # Initial investment split equally
+    
+    # Training loop
+    for episode in range(num_episodes):
+        current_index = 9  # Start from 10th data point
+        state = get_next_state(current_index-1, trend_list, date_range, df_list)
+        
+        while current_index < len(trend_list)-1:
+            # Get action using epsilon-greedy
+            if np.random.rand() < epsilon:
                 action = np.random.randint(0, num_actions)
+            else:
+                q_values = mainQN.get_q_values(norm_state(state))
+                action = get_action(q_values[0].numpy())
+            
+            # Take action and get reward
+            reward, new_portfolio_composition, new_asset_list = get_reward(
+                asset_list, action, current_index, trend_list, 
+                date_range, portfolio_composition, df_list
+            )
+            
+            # Get next state
+            next_state = get_next_state(current_index, trend_list, date_range, df_list)
+            
+            # Store transition in replay buffer
+            replay_buffer.append((
+                state, action, reward, next_state, 
+                current_index >= len(trend_list)-2
+            ))
+            
+            # Train on mini-batch
+            if len(replay_buffer) >= batch_size:
+                minibatch = random.sample(replay_buffer, batch_size)
+                
+                # Prepare batch data
+                states = np.array([norm_state(trans[0]) for trans in minibatch])
+                actions = np.array([trans[1] for trans in minibatch])
+                rewards = np.array([trans[2] for trans in minibatch])
+                next_states = np.array([norm_state(trans[3]) for trans in minibatch])
+                dones = np.array([trans[4] for trans in minibatch])
+                
+                # Calculate target Q-values
+                next_q_values = targetQN.get_q_values(next_states)
+                max_next_q = tf.reduce_max(next_q_values, axis=1)
+                targets = rewards + gamma * (1 - dones) * max_next_q
+                
+                # Train main network
+                loss = mainQN.train_step(states, targets)
+            
+            # Update state and portfolio
+            state = next_state
+            portfolio_composition = new_portfolio_composition
+            asset_list = new_asset_list
+            current_index += 1
+            
+            # Decay epsilon
+            if epsilon > final_exploration:
+                epsilon -= exploration_decay
+        
+        # Update target network periodically
+        if episode % target_update_freq == 0:
+            targetQN.set_weights(mainQN.get_weights())
+            
+        # Log progress
+        if episode % log_freq == 0:
+            print(f"Episode {episode}, Epsilon: {epsilon:.4f}")
+            
+    print("Training selesai. Menyimpan model...")
+    
+    # Simpan model utama (mainQN)
+    mainQN.save(save_paths['model'])
+    print(f"Model disimpan di: {save_paths['model']}")
+    
+    # Simpan data NAV harian
+    df_nav = pd.DataFrame({
+        'Date': date_range,
+        'Net': asset_list
+    })
+    df_nav.to_csv(save_paths['daily_nav'], index=False)
+    print(f"Data NAV harian disimpan di: {save_paths['daily_nav']}")
+    
+    # Simpan data NAV pasif
+    passive_asset_list = [10000] * len(stocks)  # Inisialisasi dengan investasi awal
+    for i, date in enumerate(date_range):
+        for j, stock in enumerate(stocks):
+            if i > 0:  # Skip hari pertama
+                prev_close = df_list[j][df_list[j]['Date'] == date_range[i-1]]['Close'].values[0]
+                curr_close = df_list[j][df_list[j]['Date'] == date]['Close'].values[0]
+                passive_asset_list[j] *= curr_close / prev_close
+    
+    df_passive = pd.DataFrame({
+        'Date': date_range,
+        'Net': [sum(passive_asset_list)] * len(date_range)
+    })
+    df_passive.to_csv(save_paths['passive_nav'], index=False)
+    print(f"Data NAV pasif disimpan di: {save_paths['passive_nav']}")
+    
+    print("Proses selesai!")
 
-            step_reward, portfolio_composition, asset_list = get_reward(asset_list, action, position_idx, trend_list,
-                                                                        date_range, portfolio_composition, df_list)
-            portfolio_composition_list.append(portfolio_composition)
-            ep_reward += step_reward
-            reward_list.append(step_reward)
-            # print(f'Reward for step: {step_reward}')
-            # print(state_)
-            # Feed new state to obtain new q_value
-            state_ = get_next_state(position_idx, trend_list, date_range, df_list)
-            q_values_ = sess.run(main_QN.q_values, feed_dict={main_QN.x: norm_state(state_)})
-            # print(f'New q_values {q_values_}')
-            # Get max q_value
-            max_q_value = np.max(q_values_)
-            position_idx += 1
-            # print(f'Norm state: {norm_state(state)}')
+if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Get save paths
+    save_paths = get_save_paths(args.portfolio, args.approach)
+    
+    # Get dataset
+    df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
+    
+    # Create Q-networks
+    mainQN = Qnetwork(config.hidden_layer_size)
+    targetQN = Qnetwork(config.hidden_layer_size)
 
-            total_steps += 1
-            target_q = q_values
-            target_q[0, action] = step_reward + gamma * max_q_value
-            # print(f'Target q: {target_q}')
-
-            _, W1 = sess.run([main_QN.update, main_QN.W1],
-                             feed_dict={main_QN.x: norm_state(state), main_QN.target: target_q})
-
-            # Calculate profit at end of episode
-
-            # Reduce exploration rate
-            if total_steps > pre_train_steps:
-                if e_rate > end_e:
-                    e_rate -= step_drop
-
-            state = state_
-
-        asset_list, nav = calc_actions_nav(asset_list, portfolio_composition, trend_list, position_idx, date_range,
-                                           final_nav=True)
-        print(nav)
-        nav_10_eps += nav
-        ep_10_reward += ep_reward
-        print(f'Reward for episode: {ep_reward}')
-
-        # Save every 50 steps from 200 onwards and before end of training
-        if (j % 50 == 0 and j >= 200) or j == num_episodes - 1:
-            saver.save(sess, path + '/model.cptk')
-            print("Saved model")
+    try:
+        print("Starting training...")
+        print(f"Portfolio: {args.portfolio}")
+        print(f"Approach: {args.approach}")
+        print(f"Number of assets: {len(df_list)}")
+        print(f"Date range: {date_range[0]} to {date_range[-1]}")
+        print(f"Number of trading days: {len(date_range)}")
+        
+        final_asset_list = train_model(
+          df_list=df_list,
+          date_range=date_range,
+          trend_list=trend_list,
+          stocks=stocks,
+          args=args
+    )
+        
+        # Print final results
+        print("\nTraining completed successfully!")
+        print("Final portfolio values:")
+        for i, asset_value in enumerate(final_asset_list):
+            print(f"Asset {i+1}: ${asset_value:,.2f}")
+        print(f"Total portfolio value: ${sum(final_asset_list):,.2f}")
+        
+        print(f"\nResults saved to: {os.path.dirname(save_paths['model'])}")
+        
+    except Exception as e:
+        print(f"\nError during training: {str(e)}")
+        raise
+    
+    finally:
+        # Clean up TensorFlow session
+        tf.compat.v1.reset_default_graph()

@@ -7,11 +7,11 @@ PORTFOLIO_CONFIG = {
         'end_date': '2023-12-31'
     },
     'portfolio2': {
-        'num_assets': 19,
+        'num_assets': 20,
         'assets': ['STOCK1', 'STOCK2', 'STOCK3', 'STOCK4', 'STOCK5',
                   'STOCK6', 'STOCK7', 'STOCK8', 'STOCK9', 'STOCK10',
                   'STOCK11', 'STOCK12', 'STOCK13', 'STOCK14', 'STOCK15',
-                  'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19'],
+                  'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19', 'STOCK20'],
         'start_date': '2021-01-01',
         'end_date': '2023-12-31'
     }

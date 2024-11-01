@@ -5,10 +5,17 @@ import config
 import util
 import sys
 from pathlib import Path
+from config import PORTFOLIO_CONFIG
+import os
 
-def get_algo_dataset(choose_set_num: int):
-    run_set = ['portfolio1', 'portfolio2']
-    choose_set = run_set[choose_set_num]
+def get_algo_dataset(portfolio_name: str):
+    """
+    Load dataset for given portfolio
+    
+    Args:
+        portfolio_name: str - nama portfolio ('portfolio1' atau 'portfolio2')
+    """
+    # Get config for specified portfolio
     config = PORTFOLIO_CONFIG[portfolio_name]
     stocks = config['assets']
     df_list = []
