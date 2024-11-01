@@ -25,13 +25,14 @@ price_period = 10
 # Training parameters
 gamma = 0.99
 batch_size = 32
-buffer_size = 1000000
+buffer_size = 100000
 initial_exploration = 1.0
 final_exploration = 0.1
 final_exploration_frame = 10000
 exploration_frame = 500000
+target_update_freq = 1000
 exploration_decay = (initial_exploration - final_exploration) / exploration_frame
 
 # Network parameters
-hidden_layer_size = 50 
+hidden_layer_size = 64
 learning_rate = 0.001

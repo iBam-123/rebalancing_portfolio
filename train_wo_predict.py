@@ -128,32 +128,24 @@ e_rate = start_e
 step_drop = (start_e - end_e) / annealing_steps
 
 class Qnetwork(tf.keras.Model):
-    def __init__(self, H):
+    def __init__(self, hidden_size):
         super(Qnetwork, self).__init__()
+        # Tambahkan regularization untuk membantu training
+        self.dense1 = tf.keras.layers.Dense(
+            hidden_size, 
+            activation='relu',
+            kernel_regularizer=tf.keras.regularizers.l2(0.01)
+        )
+        self.dense2 = tf.keras.layers.Dense(
+            config.num_actions,
+            kernel_regularizer=tf.keras.regularizers.l2(0.01)
+        )
         
-        # Define layers
-        self.dense1 = tf.keras.layers.Dense(H, 
-                                          activation='relu',
-                                          kernel_initializer=tf.keras.initializers.RandomUniform(0, 1),
-                                          bias_initializer=tf.keras.initializers.Constant(0.1))
-        
-        self.dense2 = tf.keras.layers.Dense(num_actions,
-                                          kernel_initializer=tf.keras.initializers.RandomUniform(0, 1),
-                                          bias_initializer=tf.keras.initializers.Constant(0.1))
-
-    def call(self, x):
-        # Forward pass
-        sum_regularization = 0
-        
-        # First layer
-        hidden = self.dense1(x)
-        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.dense1.kernel)
-        
-        # Output layer
-        q_values = self.dense2(hidden)
-        sum_regularization += weight_decay_beta * tf.nn.l2_loss(self.dense2.kernel)
-        
-        return q_values, sum_regularization
+    def call(self, inputs):
+        # Pastikan input adalah float32
+        x = tf.cast(inputs, tf.float32)
+        x = self.dense1(x)
+        return self.dense2(x)
 
     def get_q_values(self, state):
         """Get Q-values for a given state"""
@@ -177,8 +169,13 @@ class Qnetwork(tf.keras.Model):
         return loss
 
 def norm_state(state):
-    temp = deepcopy(state)
-    return np.reshape(np.hstack(temp), (1, config.state_dimension))
+    """Normalize state and ensure it's a valid tensor"""
+    if isinstance(state, tuple):
+        state = np.array(state)
+    state = np.array(state, dtype=np.float32)
+    if len(state.shape) == 1:
+        state = np.expand_dims(state, axis=0)
+    return state
 
 
 def process_action(action, portfolio_composition):
@@ -321,14 +318,32 @@ def adjust_portfolio_gradual(portfolio, start_idx, end_idx, step):
 
 
 def get_next_state(current_index, trend_list, date_range, df_list):
+    """
+    Get next state based on current index and trend list
+    
+    Args:
+        current_index: Current position in trend list
+        trend_list: List of trend dates
+        date_range: List of all available dates
+        df_list: List of dataframes containing price data
+    """
     if current_index + 1 >= len(trend_list):
         raise ValueError("Current index is out of range for trend_list")
     
-    date = trend_list[current_index + 1]
-    date_indices = [i for i, cur_date in enumerate(date_range) if date == cur_date]
+    # Convert trend date to same format as date_range
+    date = pd.to_datetime(trend_list[current_index + 1])
+    
+    # Find matching date in date_range
+    date_indices = []
+    for i, cur_date in enumerate(date_range):
+        if pd.to_datetime(cur_date).date() == date.date():
+            date_indices.append(i)
     
     if not date_indices:
-        raise ValueError(f"Date {date} not found in date_range")
+        # If exact date not found, find nearest available date
+        nearest_date = min(date_range, key=lambda x: abs(pd.to_datetime(x) - date))
+        date_indices = [date_range.index(nearest_date)]
+        print(f"Warning: Exact date {date} not found, using nearest date {nearest_date}")
     
     date_idx = date_indices[0]
     state_ = ()
@@ -342,10 +357,16 @@ def get_next_state(current_index, trend_list, date_range, df_list):
             price_list.extend([0] * (config.price_period - date_idx))
 
         for date in price_dates:
-            price = df_list[i][df_list[i]['Date'] == date]['Close'].values
-            if len(price) == 0:
-                raise ValueError(f"No price data for asset {i} on date {date}")
-            price_list.append(price[0])
+            try:
+                price = df_list[i][df_list[i]['Date'] == date]['Close'].values[0]
+                price_list.append(price)
+            except IndexError:
+                print(f"Warning: No price data for asset {i} on date {date}")
+                # Use previous price or 0 if no previous price available
+                if price_list:
+                    price_list.append(price_list[-1])
+                else:
+                    price_list.append(0)
 
         df = pd.DataFrame({'Close': price_list})
         df['EMA'] = indicators.exponential_moving_avg(df, window_size=6, center=False)
@@ -366,7 +387,8 @@ def get_next_state(current_index, trend_list, date_range, df_list):
     if current_index == -1:
         last_date_delta = 0
     else:
-        last_date_delta = (trend_list[current_index + 1] - trend_list[current_index]).days
+        last_date_delta = (pd.to_datetime(trend_list[current_index + 1]) - 
+                          pd.to_datetime(trend_list[current_index])).days
 
     state_ += (last_date_delta,)
     return state_
@@ -426,14 +448,15 @@ def get_predicted_indicator_df(df, price_list, scaler, model):
     return df.iloc[3:-3]
 
 
-def get_reward(asset_list, action, current_index, trend_list, date_range, 
-               portfolio_composition, df_list):
-    """Calculate reward for multi-asset portfolio"""
+def get_reward(asset_list, action, current_index, trend_list, date_range, portfolio_composition, df_list):
     reward_period = 15
     commission_rate = 1.0/800
     
     date = trend_list[current_index]
-    date_idx = date_range.index(date)
+    
+    # Cari tanggal terdekat dalam date_range
+    closest_date = min(date_range, key=lambda x: abs(x - date))
+    date_idx = date_range.index(closest_date)
     
     if date_idx + reward_period < len(date_range):
         reward_date = date_range[date_idx + reward_period]
@@ -441,12 +464,12 @@ def get_reward(asset_list, action, current_index, trend_list, date_range,
         reward_date = date_range[-1]
 
     passive_asset_sum, _ = get_reward_asset_sum(asset_list, portfolio_composition, 
-                                              date, reward_date, commission_rate, df_list)
+                                              closest_date, reward_date, commission_rate, df_list)
 
     if args.approach == 'full_swing':
         changed_composition_rates = process_action(action, portfolio_composition)
         changed_asset_sum, _ = get_reward_asset_sum(asset_list, changed_composition_rates, 
-                                                  date, reward_date, commission_rate, df_list)
+                                                  closest_date, reward_date, commission_rate, df_list)
 
         if changed_asset_sum - passive_asset_sum == 0 or passive_asset_sum == 0:
             new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
@@ -507,7 +530,7 @@ def get_reward_asset_sum(asset_list, composition, start_date, end_date, commissi
         else:
             new_asset_list[i] += amount_change
     
-    return sum(new_asset_list), new_asset_list
+    return reward, new_portfolio_composition, new_asset_list
 
 
 def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, df_list, 
@@ -543,65 +566,86 @@ def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_
 
     return new_asset_list, sum(new_asset_list)
 
+def get_initial_state(df_list, trend_list, date_range):
+    """
+    Mengambil state awal berdasarkan data yang ada.
+    
+    Args:
+        df_list: Daftar DataFrame yang berisi data harga untuk setiap aset.
+        trend_list: Daftar tanggal yang menunjukkan tren beli/jual.
+        date_range: Rentang tanggal yang digunakan untuk pelatihan.
+    
+    Returns:
+        state: State awal untuk model.
+    """
+    # Misalnya, kita ambil state dari tanggal pertama di trend_list
+    initial_date = trend_list[0]
+    initial_index = date_range.index(initial_date)
+    
+    # Ambil data harga dari DataFrame untuk tanggal ini
+    state = []
+    
+    for df in df_list:
+        price = df[df['Date'] == initial_date]['Close'].values[0]
+        state.append(price)  # Atau indikator lain yang Anda gunakan
+    
+    # Jika Anda juga ingin menambahkan informasi lain (seperti indikator teknis), lakukan di sini.
+    
+    return np.array(state)
+
 def train_model(df_list, date_range, trend_list, stocks, args):
-    """
-    Train the RL model
-    """
-    # Initialize model and optimizer
+    # Initialize networks
     mainQN = Qnetwork(config.hidden_layer_size)
     targetQN = Qnetwork(config.hidden_layer_size)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
+    mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
     
-    # Initialize portfolio
     num_assets = len(stocks)
-    portfolio_composition = [1.0/num_assets] * num_assets
-    asset_list = [10000/num_assets] * num_assets
+    portfolio_composition = [1.0/num_assets] * num_assets  # Equal weight initialization
+    asset_list = [10000/num_assets] * num_assets  # Initial investment split equally
     
     # Initialize replay buffer
-    replay_buffer = deque(maxlen=config.buffer_size)
-    
-    # Training variables
     epsilon = config.initial_exploration
+    current_index = 0
     best_reward = float('-inf')
-    
-    # Checkpoint setup for saving model
-    checkpoint = tf.train.Checkpoint(model=mainQN)
-    manager = tf.train.CheckpointManager(
-        checkpoint, 
-        directory=f'./checkpoints/{args.portfolio}/{args.approach}',
-        max_to_keep=3
-    )
+    replay_buffer = deque(maxlen=config.buffer_size)
 
+    # Training metrics
+    episode_rewards = []
+    losses = []
+    
     for episode in range(num_episodes):
-        current_index = 0  # Start from the first trend
         state = get_next_state(current_index-1, trend_list, date_range, df_list)
         episode_reward = 0
         
-        while current_index < len(trend_list)-1:
+        while current_index < len(trend_list)-1:  # Replace with your episode termination condition
             # Get action
             action = get_action(state, mainQN, epsilon)
             
-            # Process action
-            new_portfolio_composition = process_action(action, portfolio_composition)
+            # Take action and get next state and reward
+            next_state, reward, done, new_portfolio_composition, new_asset_list = step(
+                action,
+                asset_list,
+                current_index,
+                trend_list,
+                date_range,
+                portfolio_composition,
+                df_list)
             
-            # Get reward
-            reward, new_asset_list = get_reward(
-                asset_list, action, current_index, trend_list,
-                date_range, new_portfolio_composition, df_list
-            )
-            
-            # Get next state
-            next_state = get_next_state(current_index, trend_list, date_range, df_list)
+            asset_list = new_asset_list
+            episode_reward += reward
             
             # Store transition
             replay_buffer.append((
-                state, action, reward, next_state,
-                current_index >= len(trend_list)-2
+                state, 
+                action, 
+                reward, 
+                next_state, 
+                done
             ))
-            
-            # Train if we have enough samples
+
+            # Training
             if len(replay_buffer) >= config.batch_size:
-                # Sample minibatch
+                # Sample random minibatch
                 minibatch = random.sample(replay_buffer, config.batch_size)
                 
                 # Prepare batch data
@@ -611,64 +655,118 @@ def train_model(df_list, date_range, trend_list, stocks, args):
                 next_states = np.array([norm_state(trans[3]) for trans in minibatch])
                 dones = np.array([trans[4] for trans in minibatch])
                 
+                # Calculate target Q-values
+                next_q_values = targetQN(next_states)
+                max_next_q = tf.reduce_max(next_q_values, axis=1)
+                targets = rewards + config.gamma * (1 - dones) * max_next_q
+                
                 with tf.GradientTape() as tape:
-                    # Current Q values
                     q_values = mainQN(states)
                     current_q = tf.reduce_sum(
                         q_values * tf.one_hot(actions, config.num_actions),
                         axis=1
                     )
+                    loss = tf.reduce_mean(tf.square(targets - current_q))
                     
-                    # Target Q values
-                    next_q = targetQN(next_states)
-                    max_next_q = tf.reduce_max(next_q, axis=1)
-                    target_q = rewards + config.gamma * (1 - dones) * max_next_q
-                    
-                    # Compute loss
-                    loss = tf.reduce_mean(tf.square(target_q - current_q))
+                    # Add regularization losses if any
+                    if mainQN.losses:
+                        loss += sum(mainQN.losses)
                 
-                # Apply gradients
+                # Compute gradients
                 grads = tape.gradient(loss, mainQN.trainable_variables)
-                optimizer.apply_gradients(zip(grads, mainQN.trainable_variables))
+                mainQN.optimizer.apply_gradients(zip(grads, mainQN.trainable_variables))
+                
+                state = next_state
+                portfolio_composition = new_portfolio_composition
+                asset_list = new_asset_list
+                episode_reward += reward
+                current_index += 1
+                
+                # Decay epsilon
+                if epsilon > config.final_exploration:
+                    epsilon -= config.exploration_decay
             
-            # Update state and portfolio
-            state = next_state
-            portfolio_composition = new_portfolio_composition
-            asset_list = new_asset_list
-            episode_reward += reward
-            current_index += 1
-            
-            # Update epsilon
-            if epsilon > config.final_exploration:
-                epsilon -= config.exploration_decay
-        
-        # End of episode updates
-        if episode % target_update_freq == 0:
+                if done:
+                    break
+                # Update target network periodically
+        if episode % config.target_update_freq == 0:
             targetQN.set_weights(mainQN.get_weights())
-        
-        # Save if we have a new best reward
+
         if episode_reward > best_reward:
-            best_reward = episode_reward
-            manager.save()
+            best_reward = episode_reward    
         
-        # Log progress
-        if episode % log_freq == 0:
-            print(f"Episode {episode}")
+        
+        # Logging
+        if episode % 100 == 0:
+            avg_reward = np.mean(episode_rewards[-100:])
+            avg_loss = np.mean(losses[-100:]) if losses else 0
+            print(f"Episode: {episode}")
+            print(f"Average Reward: {avg_reward:.2f}")
+            print(f"Average Loss: {avg_loss:.4f}")
             print(f"Epsilon: {epsilon:.4f}")
-            print(f"Episode Reward: {episode_reward:.4f}")
-            print(f"Portfolio Value: {sum(asset_list):.2f}")
             print("------------------------")
     
-    # Save final results
-    save_results(
-        date_range=date_range,
-        asset_list=asset_list,
-        portfolio=args.portfolio,
-        approach=args.approach,
-        predict=args.predict
+    save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
+    
+    # Save daily NAV
+    df_nav = pd.DataFrame({
+        'Date': date_range,
+        'Net': asset_list
+    })
+    df_nav.to_csv(save_paths['daily_nav'], index=False)
+    
+    # Save passive NAV
+    passive_asset_list = [10000/num_assets] * num_assets
+    for i, date in enumerate(date_range):
+        for j, stock in enumerate(stocks):
+            if i > 0:  # Skip first day
+                prev_close = df_list[j][df_list[j]['Date'] == date_range[i-1]]['Close'].values[0]
+                curr_close = df_list[j][df_list[j]['Date'] == date]['Close'].values[0]
+                passive_asset_list[j] *= curr_close / prev_close
+    
+    df_passive = pd.DataFrame({
+        'Date': date_range,
+        'Net': [sum(passive_asset_list)] * len(date_range)
+    })
+    df_passive.to_csv(save_paths['passive_nav'], index=False)
+    
+    print("Training completed!")
+    return asset_list
+
+def step(action, asset_list, current_index, trend_list, date_range, portfolio_composition, df_list):
+    """
+    Mengambil tindakan dan mengembalikan state baru, reward, dan status selesai.
+    
+    Args:
+        action: Tindakan yang diambil.
+        current_index: Indeks saat ini dalam trend_list.
+        trend_list: Daftar tanggal yang menunjukkan tren beli/jual.
+        date_range: Rentang tanggal yang digunakan untuk pelatihan.
+        portfolio_composition: Komposisi portofolio saat ini.
+        df_list: Daftar DataFrame yang berisi data harga untuk setiap aset.
+    
+    Returns:
+        next_state: State baru setelah mengambil tindakan.
+        reward: Reward yang diterima dari tindakan.
+        done: Boolean yang menunjukkan apakah episode telah selesai.
+    """
+    new_portfolio_composition = process_action(action, portfolio_composition)
+    
+    reward, new_portfolio_composition, new_asset_list = get_reward(
+        asset_list, 
+        action, 
+        current_index, 
+        trend_list,
+        date_range, 
+        portfolio_composition, 
+        df_list
     )
     
-    return asset_list
+    next_state = get_next_state(current_index, trend_list, date_range, df_list)
+    
+    done = current_index >= len(trend_list) - 2
+    
+    return next_state, reward, done, new_asset_list
 
 def save_results(date_range, asset_list, portfolio, approach, predict):
     """Save training results"""
@@ -731,24 +829,18 @@ def calculate_passive_nav(date_range, df_list):
     return pd.DataFrame(nav_dict)
 
 def get_action(state, mainQN, epsilon=0.0):
-    """
-    Memilih action menggunakan epsilon-greedy policy
-    
-    Args:
-        state: Current state
-        mainQN: Main Q-Network
-        epsilon: Exploration rate (default 0.0 for pure exploitation)
-    
-    Returns:
-        action: Selected action index
-    """
-    # Exploration: memilih action secara random
     if np.random.random() < epsilon:
         return np.random.randint(0, config.num_actions)
     
-    # Exploitation: memilih action dengan Q-value tertinggi
     state_tensor = norm_state(state)
+    print("State tensor shape in get_action:", state_tensor.shape)
+    
     q_values = mainQN(state_tensor)
+    print("Q values shape in get_action:", q_values.shape)
+    
+    if len(q_values.shape) == 3:
+        q_values = tf.reshape(q_values, [-1, config.num_actions])
+    
     return np.argmax(q_values[0])
 
 def main():
@@ -875,10 +967,18 @@ if __name__ == "__main__":
     args = parse_arguments()
     
     # Get save paths
-    save_paths = get_save_paths(args.portfolio, args.approach)
-    
-    # Get dataset
+    save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
     df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
+
+    # Tambahkan kode berikut di sini
+    trend_list = sorted(list(set(trend_list)))  # Menghapus duplikat dan mengurutkan
+    date_range = sorted(list(set(date_range)))  # Menghapus duplikat dan mengurutkan
+
+    trend_list = [pd.Timestamp(d) for d in trend_list]
+    date_range = [pd.Timestamp(d) for d in date_range]
+
+    # Hanya gunakan tanggal dalam trend_list yang ada di date_range
+    trend_list = [d for d in trend_list if d in date_range]
     
     # Create Q-networks
     mainQN = Qnetwork(config.hidden_layer_size)

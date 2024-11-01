@@ -7,38 +7,39 @@ import sys
 from pathlib import Path
 from config import PORTFOLIO_CONFIG
 import os
+from datetime import datetime
 
 def get_algo_dataset(portfolio_name: str):
     """
     Load dataset for given portfolio
-    
-    Args:
-        portfolio_name: str - nama portfolio ('portfolio1' atau 'portfolio2')
     """
-    # Get config for specified portfolio
     config = PORTFOLIO_CONFIG[portfolio_name]
     stocks = config['assets']
     df_list = []
     
     # Load data untuk setiap aset
     for stock in stocks:
-        df = pd.read_csv(f'data/rl/{portfolio_name}/{stock}.csv', parse_dates=['Date'])
+        df = pd.read_csv(f'data/rl/{portfolio_name}/{stock}.csv')
+        # Convert Date column to datetime
+        df['Date'] = pd.to_datetime(df['Date'])
         df = df[df['Close'] > 0].reset_index(drop=True)
         df['returns'] = indicators.day_gain(df, 'Close').dropna()
         df_list.append(df)
 
-    # Get common dates
+    # Get common dates and convert to datetime
     date_range = remove_uncommon_dates(df_list)
+    date_range = [pd.to_datetime(d) for d in date_range]
     
     # Filter date range sesuai config
     start_date = pd.to_datetime(config['start_date'])
     end_date = pd.to_datetime(config['end_date'])
     date_range = [d for d in date_range if start_date <= d <= end_date]
     
-    # Get trend list
+    # Get trend list with datetime format
     trend_list = util.get_trend_list(stocks, df_list, 
                                    start=config['start_date'],
                                    end=config['end_date'])
+    trend_list = [pd.to_datetime(d) for d in trend_list]
     
     return df_list, date_range, trend_list, stocks
 
