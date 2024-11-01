@@ -599,7 +599,7 @@ def get_initial_state(df_list, trend_list, date_range):
     
     return np.array(state)
 
-def train_model(config, env, agent, current_step):
+def train_model(df_list, date_range, trend_list, stocks, args):
     # Initialize networks
     config.batch_size = 32
     mainQN = Qnetwork(config.hidden_layer_size)
@@ -627,14 +627,7 @@ def train_model(config, env, agent, current_step):
         while current_index < len(trend_list)-1:  # Replace with your episode termination condition
             # Get action
             action = get_action(state, mainQN, epsilon)
-            states, actions, rewards, next_states, dones = replay_buffer.sample(config.batch_size)
-
-            max_next_q = tf.reduce_max(agent.target_model.predict(next_states), axis=1)
-            max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])
-
-            for _ in range(config.update_target_network):
-              agent.update_target_network()
-
+            
             # Take action and get next state and reward
             next_state, reward, done, new_portfolio_composition, new_asset_list = step(
                 action,
@@ -1020,7 +1013,13 @@ if __name__ == "__main__":
         print(f"Date range: {date_range[0]} to {date_range[-1]}")
         print(f"Number of trading days: {len(date_range)}")
         
-        final_asset_list = train_model(config, env, agent, current_step)
+        final_asset_list = train_model(
+          df_list=df_list,
+          date_range=date_range,
+          trend_list=trend_list,
+          stocks=stocks,
+          args=args
+    )
         
         # Print final results
         print("\nTraining completed successfully!")
