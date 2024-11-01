@@ -150,8 +150,9 @@ class Qnetwork(tf.keras.Model):
     def get_q_values(self, state):
         """Get Q-values for a given state"""
         state = tf.convert_to_tensor(state, dtype=tf.float32)
-        q_values, _ = self(state)
-        return q_values
+        if len(state.shape) == 1:
+            state = tf.expand_dims(state, 0)
+        return self(state)
 
     def train_step(self, state, target):
         """Single training step"""
@@ -169,12 +170,12 @@ class Qnetwork(tf.keras.Model):
         return loss
 
 def norm_state(state):
-    """Normalize state and ensure it's a valid tensor"""
+    """Normalize state and ensure correct shape"""
     if isinstance(state, tuple):
         state = np.array(state)
     state = np.array(state, dtype=np.float32)
     if len(state.shape) == 1:
-        state = np.expand_dims(state, axis=0)
+        state = np.reshape(state, [1, -1])
     return state
 
 
@@ -516,6 +517,7 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
 def get_reward_asset_sum(asset_list, composition, start_date, end_date, commission_rate, df_list):
     new_asset_list = deepcopy(asset_list)
     
+    # Update nilai asset berdasarkan pergerakan harga
     for i, df in enumerate(df_list):
         start_price = df[df['Date'] == start_date]['Close'].values[0]
         end_price = df[df['Date'] == end_date]['Close'].values[0]
@@ -523,6 +525,7 @@ def get_reward_asset_sum(asset_list, composition, start_date, end_date, commissi
     
     total_assets = sum(new_asset_list)
     
+    # Hitung perubahan portfolio berdasarkan komposisi baru
     for i in range(len(new_asset_list)):
         amount_change = composition[i] * total_assets - new_asset_list[i]
         if amount_change > 0:
@@ -530,7 +533,10 @@ def get_reward_asset_sum(asset_list, composition, start_date, end_date, commissi
         else:
             new_asset_list[i] += amount_change
     
-    return reward, new_portfolio_composition, new_asset_list
+    # Hitung reward sebagai perubahan total asset
+    reward = sum(new_asset_list) - sum(asset_list)
+    
+    return reward, new_asset_list
 
 
 def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, df_list, 
@@ -593,8 +599,9 @@ def get_initial_state(df_list, trend_list, date_range):
     
     return np.array(state)
 
-def train_model(df_list, date_range, trend_list, stocks, args):
+def train_model(config, env, agent, current_step):
     # Initialize networks
+    config.batch_size = 32
     mainQN = Qnetwork(config.hidden_layer_size)
     targetQN = Qnetwork(config.hidden_layer_size)
     mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
@@ -605,7 +612,7 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     
     # Initialize replay buffer
     epsilon = config.initial_exploration
-    current_index = 0
+    current_index = 9
     best_reward = float('-inf')
     replay_buffer = deque(maxlen=config.buffer_size)
 
@@ -620,7 +627,14 @@ def train_model(df_list, date_range, trend_list, stocks, args):
         while current_index < len(trend_list)-1:  # Replace with your episode termination condition
             # Get action
             action = get_action(state, mainQN, epsilon)
-            
+            states, actions, rewards, next_states, dones = replay_buffer.sample(config.batch_size)
+
+            max_next_q = tf.reduce_max(agent.target_model.predict(next_states), axis=1)
+            max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])
+
+            for _ in range(config.update_target_network):
+              agent.update_target_network()
+
             # Take action and get next state and reward
             next_state, reward, done, new_portfolio_composition, new_asset_list = step(
                 action,
@@ -629,7 +643,16 @@ def train_model(df_list, date_range, trend_list, stocks, args):
                 trend_list,
                 date_range,
                 portfolio_composition,
-                df_list)
+                df_list
+            )
+
+            replay_buffer.append((
+                state,
+                action,
+                reward,
+                next_state,
+                done
+            ))
             
             asset_list = new_asset_list
             episode_reward += reward
@@ -654,46 +677,62 @@ def train_model(df_list, date_range, trend_list, stocks, args):
                 rewards = np.array([trans[2] for trans in minibatch])
                 next_states = np.array([norm_state(trans[3]) for trans in minibatch])
                 dones = np.array([trans[4] for trans in minibatch])
-                
+              
                 # Calculate target Q-values
                 next_q_values = targetQN(next_states)
-                max_next_q = tf.reduce_max(next_q_values, axis=1)
-                targets = rewards + config.gamma * (1 - dones) * max_next_q
+                max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])  
+                targets = rewards[:, None] + config.gamma * (1 - dones[:, None]) * max_next_q
                 
                 with tf.GradientTape() as tape:
-                    q_values = mainQN(states)
-                    current_q = tf.reduce_sum(
-                        q_values * tf.one_hot(actions, config.num_actions),
-                        axis=1
-                    )
-                    loss = tf.reduce_mean(tf.square(targets - current_q))
+                    # Get Q-values for current states
+                    current_q_values = mainQN(states)
                     
-                    # Add regularization losses if any
-                    if mainQN.losses:
-                        loss += sum(mainQN.losses)
+                    # Get Q-values for next states from target network
+                    next_q_values = targetQN(next_states)
+                    
+                    # Calculate max Q-values for next states
+                    max_next_q = tf.reduce_max(next_q_values, axis=1)
+                    
+                    # Calculate target values
+                    # Reshape tensors to ensure compatible dimensions
+                    rewards = tf.reshape(rewards, [32, 1])  
+                    dones = tf.reshape(dones, [32, 1])
+                    max_next_q = tf.reshape(max_next_q, [32, 1])  
+                    
+                    # Calculate targets
+                    targets = rewards + (1 - dones) * config.gamma * max_next_q
+                    targets = tf.reshape(targets, [-1, 1])
+                    
+                    # Get Q-values for taken actions
+                    action_masks = tf.one_hot(actions, config.num_actions)
+                    predicted_q_values = tf.reduce_sum(current_q_values * action_masks, axis=1, keepdims=True)
+                    
+                    # Calculate loss
+                    loss = tf.reduce_mean(tf.square(targets - predicted_q_values))
                 
-                # Compute gradients
+                # Compute gradients and apply them
                 grads = tape.gradient(loss, mainQN.trainable_variables)
                 mainQN.optimizer.apply_gradients(zip(grads, mainQN.trainable_variables))
                 
-                state = next_state
-                portfolio_composition = new_portfolio_composition
-                asset_list = new_asset_list
-                episode_reward += reward
-                current_index += 1
+                losses.append(loss.numpy())
                 
-                # Decay epsilon
-                if epsilon > config.final_exploration:
-                    epsilon -= config.exploration_decay
+            state = next_state
+            portfolio_composition = new_portfolio_composition
+            asset_list = new_asset_list
+            episode_reward += reward
+            current_index += 1
             
-                if done:
-                    break
+            # Decay epsilon
+            if epsilon > config.final_exploration:
+                epsilon -= config.exploration_decay
+            
+            if done:
+                break
                 # Update target network periodically
         if episode % config.target_update_freq == 0:
             targetQN.set_weights(mainQN.get_weights())
-
-        if episode_reward > best_reward:
-            best_reward = episode_reward    
+        
+        episode_rewards.append(episode_reward)
         
         
         # Logging
@@ -706,7 +745,11 @@ def train_model(df_list, date_range, trend_list, stocks, args):
             print(f"Epsilon: {epsilon:.4f}")
             print("------------------------")
     
+    # Save results
     save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
+    
+    # Save model
+    mainQN.save(save_paths['model'])
     
     # Save daily NAV
     df_nav = pd.DataFrame({
@@ -715,23 +758,7 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     })
     df_nav.to_csv(save_paths['daily_nav'], index=False)
     
-    # Save passive NAV
-    passive_asset_list = [10000/num_assets] * num_assets
-    for i, date in enumerate(date_range):
-        for j, stock in enumerate(stocks):
-            if i > 0:  # Skip first day
-                prev_close = df_list[j][df_list[j]['Date'] == date_range[i-1]]['Close'].values[0]
-                curr_close = df_list[j][df_list[j]['Date'] == date]['Close'].values[0]
-                passive_asset_list[j] *= curr_close / prev_close
-    
-    df_passive = pd.DataFrame({
-        'Date': date_range,
-        'Net': [sum(passive_asset_list)] * len(date_range)
-    })
-    df_passive.to_csv(save_paths['passive_nav'], index=False)
-    
-    print("Training completed!")
-    return asset_list
+    return final_asset_list
 
 def step(action, asset_list, current_index, trend_list, date_range, portfolio_composition, df_list):
     """
@@ -766,7 +793,8 @@ def step(action, asset_list, current_index, trend_list, date_range, portfolio_co
     
     done = current_index >= len(trend_list) - 2
     
-    return next_state, reward, done, new_asset_list
+    return next_state, reward, done, new_portfolio_composition, new_asset_list
+
 
 def save_results(date_range, asset_list, portfolio, approach, predict):
     """Save training results"""
@@ -992,13 +1020,7 @@ if __name__ == "__main__":
         print(f"Date range: {date_range[0]} to {date_range[-1]}")
         print(f"Number of trading days: {len(date_range)}")
         
-        final_asset_list = train_model(
-          df_list=df_list,
-          date_range=date_range,
-          trend_list=trend_list,
-          stocks=stocks,
-          args=args
-    )
+        final_asset_list = train_model(config, env, agent, current_step)
         
         # Print final results
         print("\nTraining completed successfully!")
