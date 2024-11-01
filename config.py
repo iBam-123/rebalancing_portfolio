@@ -1,4 +1,21 @@
 # Default parameters
+PORTFOLIO_CONFIG = {
+    'portfolio1': {
+        'num_assets': 14,
+        'assets': ['AUD', 'CAD', 'CNY', 'EMLC', 'EUR', 'GBP', 'INR', 'JPY', 'KRW', 'MYR', 'NZD', 'PLN', 'SGD', 'USD'],
+        'start_date': '2021-01-01',
+        'end_date': '2023-12-31'
+    },
+    'portfolio2': {
+        'num_assets': 19,
+        'assets': ['STOCK1', 'STOCK2', 'STOCK3', 'STOCK4', 'STOCK5',
+                  'STOCK6', 'STOCK7', 'STOCK8', 'STOCK9', 'STOCK10',
+                  'STOCK11', 'STOCK12', 'STOCK13', 'STOCK14', 'STOCK15',
+                  'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19'],
+        'start_date': '2021-01-01',
+        'end_date': '2023-12-31'
+    }
+}
 label_name = 'Close'
 weight_decay_beta = 0.00001
 state_dimension = 5

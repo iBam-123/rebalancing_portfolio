@@ -15,13 +15,67 @@ import indicators
 import argparse
 
 tf.compat.v1.disable_eager_execution()
-arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("--choose_set_num", required=True)
-arg_parser.add_argument("--stocks", required=True)
-arg_parser.add_argument("--path", required=True)
-arg_parser.add_argument("--load", action='store_true')
-arg_parser.add_argument("--full_swing", action='store_true')
-args = arg_parser.parse_args()
+#arg_parser = argparse.ArgumentParser()
+#arg_parser.add_argument("--choose_set_num", required=True)
+#arg_parser.add_argument("--stocks", required=True)
+#arg_parser.add_argument("--path", required=True)
+#arg_parser.add_argument("--load", action='store_true')
+#arg_parser.add_argument("--full_swing", action='store_true')
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Train RL model with prediction")
+    parser.add_argument("--portfolio", required=True, 
+                       choices=['portfolio1', 'portfolio2'],
+                       help="Select which portfolio to train")
+    parser.add_argument("--approach", required=True,
+                       choices=['gradual', 'full_swing'],
+                       help="Select rebalancing approach")
+    parser.add_argument("--predict", action="store_true",
+                       help="Use LSTM prediction")
+    return parser.parse_args()
+
+# Setelah fungsi parse_arguments()
+def get_save_paths(portfolio: str, approach: str, predict: bool = False):
+    """Get paths for saving results"""
+    base_path = f'data/rl/{portfolio}'
+    
+    # Determine subfolder based on approach and prediction
+    if approach == 'gradual':
+        subfolder = 'non_lagged' if predict else 'lagged'
+    else:  # full_swing
+        subfolder = 'fs_non_lagged' if predict else 'fs_lagged'
+    
+    # Create folder if it doesn't exist
+    folder_path = f'{base_path}/{subfolder}'
+    os.makedirs(folder_path, exist_ok=True)
+    
+    return {
+        'model': f'{folder_path}/model',
+        'daily_nav': f'{folder_path}/daily_nav.csv',
+        'passive_nav': f'{folder_path}/passive_daily_nav.csv'
+    }
+
+# Di bagian main atau training loop, setelah inisialisasi model
+args = parse_arguments()
+save_paths = get_save_paths(args)
+
+# Setelah setiap episode training atau pada interval tertentu
+if episode % save_interval == 0:
+    # Save model weights
+    saver.save(sess, save_paths['model'])
+    
+    # Save daily NAV
+    nav_df = pd.DataFrame({
+        'Date': date_range,
+        'Net': portfolio_values
+    })
+    nav_df.to_csv(save_paths['daily_nav'], index=False)
+    
+    # Save passive NAV
+    passive_df = pd.DataFrame({
+        'Date': date_range,
+        **{stock: values for stock, values in zip(stocks, passive_values)}
+    })
+    passive_df.to_csv(save_paths['passive_nav'], index=False)
 
 run_set = ['portfolio1', 'portfolio2']
 stocks = args.stocks.split(',')
@@ -95,75 +149,100 @@ def norm_state(state):
 
 def process_action(action, portfolio_composition):
     new_portfolio_composition = deepcopy(portfolio_composition)
+    num_assets = len(portfolio_composition)
+    
     if args.full_swing:
         ####################### Full switch ##############################
-        # high risk up, med risk up
-        if action == 0:
-            for _ in range(3):
-                new_portfolio_composition[0] = 0.8
-                new_portfolio_composition[1] = 0.1
-                new_portfolio_composition[2] = 0.1
-        elif action == 1:
-            for _ in range(3):
-                new_portfolio_composition[0] = 0.1
-                new_portfolio_composition[1] = 0.8
-                new_portfolio_composition[2] = 0.1
-        elif action == 2:
-            for _ in range(3):
-                new_portfolio_composition[0] = 0.45
-                new_portfolio_composition[1] = 0.45
-                new_portfolio_composition[2] = 0.1
-        elif action == 3:
-            for _ in range(3):
-                new_portfolio_composition[0] = 0.1
-                new_portfolio_composition[1] = 0.1
-                new_portfolio_composition[2] = 0.8
-        ###############################################################
+        if action == 0:  # High risk focus
+            high_risk_portion = num_assets // 3
+            for i in range(num_assets):
+                if i < high_risk_portion:
+                    new_portfolio_composition[i] = 0.6 / high_risk_portion
+                elif i < 2 * high_risk_portion:
+                    new_portfolio_composition[i] = 0.3 / high_risk_portion
+                else:
+                    new_portfolio_composition[i] = 0.1 / (num_assets - 2 * high_risk_portion)
+                    
+        elif action == 1:  # Medium risk focus
+            med_risk_portion = num_assets // 3
+            for i in range(num_assets):
+                if i < med_risk_portion:
+                    new_portfolio_composition[i] = 0.3 / med_risk_portion
+                elif i < 2 * med_risk_portion:
+                    new_portfolio_composition[i] = 0.5 / med_risk_portion
+                else:
+                    new_portfolio_composition[i] = 0.2 / (num_assets - 2 * med_risk_portion)
+                    
+        elif action == 2:  # Balanced
+            balanced_weight = 1.0 / num_assets
+            new_portfolio_composition = [balanced_weight] * num_assets
+            
+        elif action == 3:  # Conservative
+            low_risk_portion = num_assets // 3
+            for i in range(num_assets):
+                if i < low_risk_portion:
+                    new_portfolio_composition[i] = 0.1 / low_risk_portion
+                elif i < 2 * low_risk_portion:
+                    new_portfolio_composition[i] = 0.2 / low_risk_portion
+                else:
+                    new_portfolio_composition[i] = 0.7 / (num_assets - 2 * low_risk_portion)
+    
     else:
-        ####################### Gradual ##############################
-        # high risk up, med risk up
-        if action == 0:
-            for _ in range(3):
-                # low risk base rate enough, L -> H
-                if new_portfolio_composition[2] - 0.1 >= 0.1:
-                    new_portfolio_composition[0] += 0.1
-                    new_portfolio_composition[2] -= 0.1
-                # med risk base rate enough, M -> H
-                if new_portfolio_composition[1] - 0.1 >= 0.1:
-                    new_portfolio_composition[0] += 0.1
-                    new_portfolio_composition[1] -= 0.1
-        elif action == 1:
-            for _ in range(3):
-                # high risk base rate enough, H -> M
-                if new_portfolio_composition[0] - 0.1 >= 0.1:
-                    new_portfolio_composition[1] += 0.1
-                    new_portfolio_composition[0] -= 0.1
-                # low risk base rate enough, L -> M
-                if new_portfolio_composition[2] - 0.1 >= 0.1:
-                    new_portfolio_composition[1] += 0.1
-                    new_portfolio_composition[2] -= 0.1
-        elif action == 2:
-            for _ in range(3):
-                # low risk base rate enough, L -> H
-                if new_portfolio_composition[0] - 0.1 >= 0.1:
-                    new_portfolio_composition[2] += 0.1
-                    new_portfolio_composition[0] -= 0.1
-                # low risk base rate enough, L -> M
-                if new_portfolio_composition[1] - 0.1 >= 0.1:
-                    new_portfolio_composition[2] += 0.1
-                    new_portfolio_composition[1] -= 0.1
-        elif action == 3:
-            for _ in range(3):
-                # high risk base rate enough, H -> L
-                if new_portfolio_composition[0] - 0.1 >= 0.1:
-                    new_portfolio_composition[2] += 0.1
-                    new_portfolio_composition[0] -= 0.1
-                # med risk base rate enough, M -> L
-                if new_portfolio_composition[1] - 0.1 >= 0.1:
-                    new_portfolio_composition[2] += 0.1
-                    new_portfolio_composition[1] -= 0.1
-        ################################################
+        ###################### Gradual ##############################
+        step = 0.1
+        if action == 0:  # Increase high risk
+            high_risk_end = num_assets // 3
+            for i in range(high_risk_end):
+                if new_portfolio_composition[i] + step <= 0.8:
+                    new_portfolio_composition[i] += step
+                    # Decrease others proportionally
+                    decrease = step / (num_assets - 1)
+                    for j in range(num_assets):
+                        if j != i:
+                            new_portfolio_composition[j] = max(0.1, new_portfolio_composition[j] - decrease)
+                            
+        elif action == 1:  # Increase medium risk
+            med_start = num_assets // 3
+            med_end = 2 * num_assets // 3
+            for i in range(med_start, med_end):
+                if new_portfolio_composition[i] + step <= 0.8:
+                    new_portfolio_composition[i] += step
+                    decrease = step / (num_assets - 1)
+                    for j in range(num_assets):
+                        if j != i:
+                            new_portfolio_composition[j] = max(0.1, new_portfolio_composition[j] - decrease)
+                            
+        elif action == 2:  # Move towards balanced
+            target = 1.0 / num_assets
+            for i in range(num_assets):
+                if new_portfolio_composition[i] > target:
+                    new_portfolio_composition[i] -= step
+                else:
+                    new_portfolio_composition[i] += step
+                    
+        elif action == 3:  # Increase low risk
+            low_risk_start = 2 * num_assets // 3
+            for i in range(low_risk_start, num_assets):
+                if new_portfolio_composition[i] + step <= 0.8:
+                    new_portfolio_composition[i] += step
+                    decrease = step / (num_assets - 1)
+                    for j in range(num_assets):
+                        if j != i:
+                            new_portfolio_composition[j] = max(0.1, new_portfolio_composition[j] - decrease)
+    
+    # Normalize to ensure sum = 1
+    total = sum(new_portfolio_composition)
+    new_portfolio_composition = [x/total for x in new_portfolio_composition]
+    
     return new_portfolio_composition
+
+def adjust_portfolio_gradual(portfolio, start_idx, end_idx, step):
+    """Helper function untuk menyesuaikan alokasi portfolio secara gradual"""
+    for i in range(start_idx, end_idx):
+        portfolio[i] += step
+    for i in range(len(portfolio)):
+        if i < start_idx or i >= end_idx:
+            portfolio[i] -= step / (len(portfolio) - (end_idx - start_idx))
 
 
 def get_next_state(current_index, trend_list, date_range, df_list):
@@ -235,14 +314,15 @@ def get_predicted_indicator_df(df, price_list, scaler, model):
     return df.iloc[3:-3]
 
 
-def get_reward(asset_list, action, current_index, trend_list, date_range, portfolio_composition, df_list):
-    new_asset_list = deepcopy(asset_list)
+def get_reward(asset_list, action, current_index, trend_list, date_range, 
+               portfolio_composition, df_list):
+    """Calculate reward for multi-asset portfolio"""
+    num_assets = len(asset_list)
     reward_period = 15
-    commisson_rate = 1.0 / 800
-
-    # get reward from reward_period number of days
+    commission_rate = 1.0/800
+    
     date = trend_list[current_index]
-    date_idx = [i for i, cur_date in enumerate(date_range) if date == cur_date][0]
+    date_idx = date_range.index(date)
     # Check price data for state. Get the price_period num of days price before period
     if date_idx + reward_period < len(date_range):
         reward_date = date_range[date_idx + reward_period]
@@ -305,26 +385,24 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
     return reward + nav_reward / 10000000, changed_composition_rates, new_asset_list
 
 
-def get_reward_asset_sum(asset_list, changed_composition_rates, current_date, reward_date, commisson_rate):
-    temp_asset_list = deepcopy(asset_list)
-    # print(temp_asset_list)
-    for i in range(3):
-        # Update asset values
-        previous_close_price = df_list[i][df_list[i]['Date'] == current_date]['Close'].values[0]
-        current_close_price = df_list[i][df_list[i]['Date'] == reward_date]['Close'].values[0]
-        # print('Prev_close',previous_close_price,'Current_close',current_close_price)
-        temp_asset_list[i] = temp_asset_list[i] * current_close_price / previous_close_price
-        # print(temp_asset_list[i])
-
-    total_assets = sum(temp_asset_list)
-    # print('total assets',total_assets)
-    for i in range(3):
-        amount_change = changed_composition_rates[i] * total_assets - asset_list[i]
-        if amount_change <= 0:
-            temp_asset_list[i] = temp_asset_list[i] + amount_change
+def get_reward_asset_sum(asset_list, composition, start_date, end_date, commission_rate, df_list):
+    new_asset_list = deepcopy(asset_list)
+    
+    for i, df in enumerate(df_list):
+        start_price = df[df['Date'] == start_date]['Close'].values[0]
+        end_price = df[df['Date'] == end_date]['Close'].values[0]
+        new_asset_list[i] *= end_price / start_price
+    
+    total_assets = sum(new_asset_list)
+    
+    for i in range(len(new_asset_list)):
+        amount_change = composition[i] * total_assets - new_asset_list[i]
+        if amount_change > 0:
+            new_asset_list[i] += amount_change * (1 - commission_rate) ** 2
         else:
-            temp_asset_list[i] = temp_asset_list[i] + amount_change * (1 - commisson_rate) ** 2
-    return sum(temp_asset_list), temp_asset_list
+            new_asset_list[i] += amount_change
+    
+    return sum(new_asset_list), new_asset_list
 
 
 def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, final_nav=False,

@@ -43,40 +43,43 @@ def get_trend_list(stocks:list, df_list: list, start='1/1/2021', end='31/12/2023
     trend_list = sorted(temp_trend_list)
     return trend_list
 
-def cal_portfolio_comp_fitness(asset_list, base_rates, original_portfolio_comp, df_list, date_range, trend_list, cvar_period, mc_period, sp_period, c1, c2, thres, fitness=[]):
-    """Calculates the portfolio comp at each change and updates fitness values. Returns a boolean changes list
-    """
+def cal_portfolio_comp_fitness(asset_list, base_rates, original_portfolio_comp, 
+                             df_list, date_range, trend_list, cvar_period, 
+                             mc_period, sp_period, c1, c2, thres, fitness=[]):
+    """Calculates portfolio composition dynamically"""
+    num_assets = len(asset_list)
     change_list = []
-    i = 0
     new_portfolio_comp = deepcopy(original_portfolio_comp)
-    last_trade_date=[date_range[0]]
+    last_trade_date = [date_range[0]]
+    
     for date in date_range:
-        high_risk_date = df_list[0][df_list[0]['Date'] == date]
-        med_risk_date = df_list[1][df_list[1]['Date'] == date]
-        low_risk_date = df_list[2][df_list[2]['Date'] == date]
-        if not (high_risk_date.empty or med_risk_date.empty or low_risk_date.empty):
-            if date in trend_list:
-                # print('Reallocating at {}'.format(date))
-                # Hack for multiple base rates
-                if len(base_rates) == 3:
-                    new_portfolio_comp = util.get_portfolio_comp(original_portfolio_comp, df_list, base_rates, date,
-                        cvar_period, mc_period, sp_period, c1, c2)
-                else:
-                    new_portfolio_comp = util.get_portfolio_comp(original_portfolio_comp, df_list, base_rates[i], date,
-                        cvar_period, mc_period, sp_period, c1, c2)
-                    i += 1
-    # With commission
-                change = cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date, 
-                    original_portfolio_comp=original_portfolio_comp, thres=thres)
-    # # Without commission
-    #             change = cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date)
-    # #########################
-                original_portfolio_comp = new_portfolio_comp
-                change_list.append(change)
-            else:
-                change_list.append((False, 0, date))
-    asset_list = cal_fitness_with_nav(df_list, asset_list, last_trade_date[-1], date_range[-1], fitness)
-    return change_list, asset_list, [original_portfolio_comp[0], original_portfolio_comp[1], original_portfolio_comp[2]]
+        # Check if all assets have data for current date
+        asset_data_available = True
+        for df in df_list:
+            if df[df['Date'] == date].empty:
+                asset_data_available = False
+                break
+                
+        if asset_data_available and date in trend_list:
+            new_portfolio_comp = util.get_portfolio_comp(
+                original_portfolio_comp, df_list, base_rates, date,
+                cvar_period, mc_period, sp_period, c1, c2)
+            
+            change = cal_nav(date, new_portfolio_comp, df_list, 
+                           asset_list, last_trade_date,
+                           original_portfolio_comp=original_portfolio_comp,
+                           thres=thres)
+            
+            original_portfolio_comp = new_portfolio_comp
+            change_list.append(change)
+        else:
+            change_list.append((False, 0, date))
+            
+    asset_list = cal_fitness_with_nav(df_list, asset_list, 
+                                    last_trade_date[-1], 
+                                    date_range[-1], fitness)
+    
+    return change_list, asset_list, original_portfolio_comp
 
 def cal_nav(date, new_portfolio_comp, df_list, asset_list, last_trade_date: list, original_portfolio_comp=[], thres=0, commisson_rate=1.0/800):
     """Updates asset list with calculated new assets. Returns change_list of (True, asset_list, date) or (False, 0, date)
