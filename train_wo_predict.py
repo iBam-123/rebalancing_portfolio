@@ -49,7 +49,7 @@ def get_save_paths(portfolio: str, approach: str, predict: bool = False):
     os.makedirs(folder_path, exist_ok=True)
     
     return {
-        'model': f'{folder_path}/model',
+        'model': f'{folder_path}/model.keras',  # Tambahkan ekstensi .keras
         'daily_nav': f'{folder_path}/daily_nav.csv',
         'passive_nav': f'{folder_path}/passive_daily_nav.csv'
     }
@@ -127,15 +127,15 @@ class Qnetwork(tf.keras.Model):
             activation='relu',
             kernel_regularizer=tf.keras.regularizers.l2(0.01)
         )
+        self.dropout = tf.keras.layers.Dropout(0.2)  # Tambahkan dropout
         self.dense2 = tf.keras.layers.Dense(
             config.num_actions,
             kernel_regularizer=tf.keras.regularizers.l2(0.01)
         )
         
-    def call(self, inputs):
-        # Pastikan input adalah float32
-        x = tf.cast(inputs, tf.float32)
-        x = self.dense1(x)
+    def call(self, inputs, training=False):  # Tambahkan parameter training
+        x = self.dense1(inputs)
+        x = self.dropout(x, training=training)  # Gunakan dropout dalam call
         return self.dense2(x)
 
     def save(self, filepath):
@@ -439,6 +439,10 @@ def get_predicted_indicator_df(df, price_list, scaler, model):
     # This is done to remove potential edge effects from the centered indicators
     return df.iloc[3:-3]
 
+def normalize_rewards(rewards):
+    rewards = np.array(rewards)
+    # Membuat mean = 0 dan std = 1
+    return (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
 def get_reward(asset_list, action, current_index, trend_list, date_range, portfolio_composition, df_list):
     reward_period = 15
@@ -467,7 +471,7 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
             new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
                                                         trend_list, current_index, date_range, df_list)
             return 0, changed_composition_rates, new_asset_list
-            
+
         new_asset_list, nav_reward = calc_actions_nav(asset_list, portfolio_composition, 
                                                     trend_list, current_index, date_range, df_list)
 
@@ -500,9 +504,20 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
 
     trend_list_len = len(trend_list)
     time_scaling_factor = 0.5 * (trend_list_len - current_index) / trend_list_len + 0.5
-    reward = (changed_asset_sum - passive_asset_sum) / passive_asset_sum * time_scaling_factor
+    raw_reward = (changed_asset_sum - passive_asset_sum) / passive_asset_sum * time_scaling_factor
+    nav_reward_scaled = nav_reward / 10000000
     
-    return reward + nav_reward / 10000000, changed_composition_rates, new_asset_list
+    # Normalize rewards
+    rewards_to_normalize = [raw_reward, nav_reward_scaled]
+    normalized_rewards = normalize_rewards(rewards_to_normalize)
+    
+    # Combine normalized rewards
+    final_reward = normalized_rewards[0] + normalized_rewards[1]
+    
+    # Clip reward untuk mencegah nilai ekstrim
+    final_reward = np.clip(final_reward, -1, 1)
+    
+    return final_reward, changed_composition_rates, new_asset_list
 
 
 def get_reward_asset_sum(asset_list, composition, start_date, end_date, commission_rate, df_list):
@@ -512,22 +527,21 @@ def get_reward_asset_sum(asset_list, composition, start_date, end_date, commissi
     for i, df in enumerate(df_list):
         start_price = df[df['Date'] == start_date]['Close'].values[0]
         end_price = df[df['Date'] == end_date]['Close'].values[0]
-        new_asset_list[i] *= end_price / start_price
+        price_change = end_price / start_price
+        new_asset_list[i] *= price_change
     
     total_assets = sum(new_asset_list)
     
+    transaction_costs = 0
+
     # Hitung perubahan portfolio berdasarkan komposisi baru
     for i in range(len(new_asset_list)):
-        amount_change = composition[i] * total_assets - new_asset_list[i]
-        if amount_change > 0:
-            new_asset_list[i] += amount_change * (1 - commission_rate) ** 2
-        else:
-            new_asset_list[i] += amount_change
+        target_amount = composition[i] * total_assets
+        amount_change = abs(target_amount - new_asset_list[i])
+        transaction_costs += amount_change * commission_rate
     
-    # Hitung reward sebagai perubahan total asset
-    reward = sum(new_asset_list) - sum(asset_list)
-    
-    return reward, new_asset_list
+    # Return yang sudah memperhitungkan biaya transaksi
+    return sum(new_asset_list) - transaction_costs, new_asset_list
 
 
 def calc_actions_nav(asset_list, portfolio_composition, trend_list, index, date_range, df_list, 
@@ -606,11 +620,13 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     epsilon = config.initial_exploration
     replay_buffer = deque(maxlen=config.buffer_size)
     early_stopping_patience = 50
-
+    
     # Training metrics
     episode_rewards = []
     losses = []
+    patience = 50
     best_reward = float('-inf')
+    episodes_without_improvement = 0
     current_index = 0
     with tqdm(total=config.num_episodes, desc="Training Progress") as pbar:
       for episode in range(config.num_episodes):
@@ -670,6 +686,8 @@ def train_model(df_list, date_range, trend_list, stocks, args):
                   rewards = tf.reshape(rewards, (config.batch_size, 1))
                   dones = tf.reshape(dones, (config.batch_size, 1))
 
+                  rewards = normalize_rewards(rewards)
+                  
                   # Calculate target Q-values
                   next_q_values = targetQN.get_q_values(next_states)
                   max_next_q = tf.reduce_max(next_q_values, axis=1)
@@ -726,17 +744,22 @@ def train_model(df_list, date_range, trend_list, stocks, args):
               avg_loss = np.mean(losses[-100:]) if losses else 0
               print(f"Episode: {episode}")
               print(f"Average Reward: {avg_reward:.2f}")
+              print(f"Average Reward (Normalized): {np.mean(normalize_rewards(episode_rewards[-100:])):.2f}")
               print(f"Average Loss: {avg_loss:.4f}")
-              print(f"Epsilon: {epsilon:.4f}")
+              print(f"Max Reward: {max(episode_rewards):.2f}")
+              print(f"Min Reward: {min(episode_rewards):.2f}")
+              print(f"Portfolio Value: {sum(asset_list):.2f}")
               print("------------------------")
 
-          if episode_reward > best_reward:
-              best_reward = episode_reward
-              no_improvement_count = 0
+          avg_reward = np.mean(episode_rewards[-100:])
+
+          if avg_reward > best_reward:
+              best_reward = avg_reward
+              episodes_without_improvement = 0
           else:
-              no_improvement_count += 1
-        
-          if no_improvement_count >= early_stopping_patience:
+              episodes_without_improvement += 1
+            
+          if episodes_without_improvement >= patience:
               print(f"Early stopping at episode {episode}")
               break
     
