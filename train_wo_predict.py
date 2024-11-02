@@ -441,6 +441,7 @@ def get_predicted_indicator_df(df, price_list, scaler, model):
 
 def normalize_rewards(rewards):
     rewards = np.array(rewards)
+    return np.clip(rewards, -1, 1)
     # Membuat mean = 0 dan std = 1
     return (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
@@ -505,7 +506,7 @@ def get_reward(asset_list, action, current_index, trend_list, date_range, portfo
     trend_list_len = len(trend_list)
     time_scaling_factor = 0.5 * (trend_list_len - current_index) / trend_list_len + 0.5
     raw_reward = (changed_asset_sum - passive_asset_sum) / passive_asset_sum * time_scaling_factor
-    nav_reward_scaled = nav_reward / 10000000
+    nav_reward_scaled = nav_reward / 1000
     
     # Normalize rewards
     rewards_to_normalize = [raw_reward, nav_reward_scaled]

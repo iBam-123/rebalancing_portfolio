@@ -13,16 +13,23 @@ def get_algo_dataset(portfolio_name: str):
     """
     Load dataset for given portfolio
     """
+    import dask.dataframe as dd
+
     config = PORTFOLIO_CONFIG[portfolio_name]
     stocks = config['assets']
     df_list = []
     
     # Load data untuk setiap aset
     for stock in stocks:
-        df = pd.read_csv(f'data/rl/{portfolio_name}/{stock}.csv')
-        # Convert Date column to datetime
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = df[df['Close'] > 0].reset_index(drop=True)
+        # Baca data menggunakan chunks
+        df = dd.read_csv(f'data/rl/{portfolio_name}/{stock}.csv')
+        
+        # Proses dalam chunks
+        df = df.map_partitions(lambda pdf: pdf[pdf['Close'] > 0])
+        df['Date'] = dd.to_datetime(df['Date'])
+        
+        # Compute hasil akhir
+        df = df.compute()
         df['returns'] = indicators.day_gain(df, 'Close').dropna()
         df_list.append(df)
 
