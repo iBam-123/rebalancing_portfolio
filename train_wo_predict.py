@@ -26,15 +26,10 @@ from collections import deque
 #arg_parser.add_argument("--load", action='store_true')
 #arg_parser.add_argument("--full_swing", action='store_true')
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Train RL model")
-    parser.add_argument("--portfolio", required=True, 
-                       choices=['portfolio1', 'portfolio2'],
-                       help="Select which portfolio to train")
-    parser.add_argument("--approach", required=True,
-                       choices=['gradual', 'full_swing'],
-                       help="Select rebalancing approach")
-    parser.add_argument("--predict", action="store_true",
-                       help="Use LSTM prediction")
+    parser = argparse.ArgumentParser(description="Train RL model for portfolio optimization")
+    parser.add_argument("--portfolio", required=True, choices=['portfolio1', 'portfolio2'], help="Select portfolio to train")
+    parser.add_argument("--approach", required=True, choices=['gradual', 'full_swing'], help="Select rebalancing approach")
+    parser.add_argument("--predict", action="store_true", help="Use LSTM prediction")
     return parser.parse_args()
 
 # Setelah fungsi parse_arguments()
@@ -130,7 +125,6 @@ step_drop = (start_e - end_e) / annealing_steps
 class Qnetwork(tf.keras.Model):
     def __init__(self, hidden_size):
         super(Qnetwork, self).__init__()
-        # Tambahkan regularization untuk membantu training
         self.dense1 = tf.keras.layers.Dense(
             hidden_size, 
             activation='relu',
@@ -148,7 +142,6 @@ class Qnetwork(tf.keras.Model):
         return self.dense2(x)
 
     def get_q_values(self, state):
-        """Get Q-values for a given state"""
         state = tf.convert_to_tensor(state, dtype=tf.float32)
         if len(state.shape) == 1:
             state = tf.expand_dims(state, 0)
@@ -362,34 +355,29 @@ def get_next_state(current_index, trend_list, date_range, df_list):
                 price = df_list[i][df_list[i]['Date'] == date]['Close'].values[0]
                 price_list.append(price)
             except IndexError:
-                print(f"Warning: No price data for asset {i} on date {date}")
-                # Use previous price or 0 if no previous price available
-                if price_list:
-                    price_list.append(price_list[-1])
-                else:
-                    price_list.append(0)
+                price_list.append(price_list[-1] if price_list else 0)
 
         df = pd.DataFrame({'Close': price_list})
+
         df['EMA'] = indicators.exponential_moving_avg(df, window_size=6, center=False)
         df['MACD_Line'] = indicators.macd_line(df, ema1_window_size=3, ema2_window_size=6, center=False)
         df['MACD_Signal'] = indicators.macd_signal(df, window_size=6, ema1_window_size=3, ema2_window_size=6, center=False)
 
         ema_price = util.z_score_normalization(df.iloc[-1]['EMA'], df['EMA'].tolist())
         macd = df['MACD_Line'].iloc[-1] - df['MACD_Signal'].iloc[-1]
-        macd = util.scale(macd, df['MACD_Line'] - df['MACD_Signal'])
+        macd = util.scale(macd, (df['MACD_Line'] - df['MACD_Signal']).tolist())
 
-        if math.isnan(ema_price) or math.isnan(macd):
-            print(f'nan encountered: ema = {ema_price}, macd = {macd}')
-            ema_price = 0 if math.isnan(ema_price) else ema_price
-            macd = 0 if math.isnan(macd) else macd
+        if np.isnan(ema_price) or np.isnan(macd):
+            print(f'Warning: nan encountered: ema = {ema_price}, macd = {macd}')
+            ema_price = 0 if np.isnan(ema_price) else ema_price
+            macd = 0 if np.isnan(macd) else macd
 
         state_ += (ema_price, macd)
 
     if current_index == -1:
         last_date_delta = 0
     else:
-        last_date_delta = (pd.to_datetime(trend_list[current_index + 1]) - 
-                          pd.to_datetime(trend_list[current_index])).days
+        last_date_delta = (trend_list[current_index + 1] - trend_list[current_index]).days
 
     state_ += (last_date_delta,)
     return state_
@@ -602,7 +590,7 @@ def get_initial_state(df_list, trend_list, date_range):
 def train_model(df_list, date_range, trend_list, stocks, args):
     # Initialize networks
     #max_next_q = tf.zeros([config.batch_size, 1])
-    config.batch_size = 32
+    #config.batch_size = 32
     mainQN = Qnetwork(config.hidden_layer_size)
     targetQN = Qnetwork(config.hidden_layer_size)
     mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
@@ -613,22 +601,26 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     
     # Initialize replay buffer
     epsilon = config.initial_exploration
-    current_index = 9
-    best_reward = float('-inf')
     replay_buffer = deque(maxlen=config.buffer_size)
 
     # Training metrics
     episode_rewards = []
     losses = []
     
+    current_index = 0
     for episode in range(num_episodes):
         state = get_next_state(current_index-1, trend_list, date_range, df_list)
         episode_reward = 0
-        
+        current_index = 9
+
         while current_index < len(trend_list)-1:  # Replace with your episode termination condition
             # Get action
-            action = get_action(state, mainQN, epsilon)
-            
+            if np.random.rand() < epsilon:
+                action = np.random.randint(0, config.num_actions)
+            else:
+                q_values = mainQN.get_q_values(norm_state(state))
+                action = np.argmax(q_values[0])
+
             # Take action and get next state and reward
             next_state, reward, done, new_portfolio_composition, new_asset_list = step(
                 action,
@@ -650,62 +642,40 @@ def train_model(df_list, date_range, trend_list, stocks, args):
             
             asset_list = new_asset_list
             episode_reward += reward
-            
-            # Store transition
-            replay_buffer.append((
-                state, 
-                action, 
-                reward, 
-                next_state, 
-                done
-            ))
 
             # Training
             if len(replay_buffer) >= config.batch_size:
+                # Sample minibatch
                 minibatch = random.sample(replay_buffer, config.batch_size)
                 
+                # Prepare batch data
                 states = np.array([norm_state(trans[0]) for trans in minibatch])
                 actions = np.array([trans[1] for trans in minibatch])
                 rewards = np.array([trans[2] for trans in minibatch])
                 next_states = np.array([norm_state(trans[3]) for trans in minibatch])
                 dones = np.array([trans[4] for trans in minibatch])
 
-                states = tf.cast(states, tf.float32)
-                actions = tf.cast(actions, tf.float32)
-                rewards = tf.cast(rewards, tf.float32)
-                next_states = tf.cast(next_states, tf.float32)
-                dones = tf.cast(dones, tf.float32)
+                states = tf.convert_to_tensor(states, dtype=tf.float32)
+                next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
+                rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+                actions = tf.convert_to_tensor(actions, dtype=tf.int32)
+                dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+                
+                rewards = tf.reshape(rewards, (config.batch_size, 1))
+                dones = tf.reshape(dones, (config.batch_size, 1))
 
-                next_q_values = targetQN(next_states)
+                # Calculate target Q-values
+                next_q_values = targetQN.get_q_values(next_states)
                 max_next_q = tf.reduce_max(next_q_values, axis=1)
-                print(config.batch_size)  # Pastikan nilainya 32
-                max_next_q = tf.reshape(max_next_q, [config.batch_size, 1])
-
+                max_next_q = tf.reshape(max_next_q, [-1, 1])  # Reshape to column vector
+                
+                # Calculate targets
                 targets = rewards[:, None] + config.gamma * (1 - dones[:, None]) * max_next_q
 
                 with tf.GradientTape() as tape:
                     # Get current Q-values
                     current_q_values = mainQN(states)
-                    
-                    # Get next Q-values from target network
-                    next_q_values = targetQN(next_states)
-                    
-                    # Calculate max Q-values for next states
-                    max_next_q = tf.reduce_max(next_q_values, axis=1)
-                    
-                    # Ensure correct shape before calculating targets
-                    rewards = tf.reshape(rewards, [-1, 1])
-                    dones = tf.reshape(dones, [-1, 1])
-                    max_next_q = tf.reshape(max_next_q, [-1, 1])
-
-                    print("States shape:", tf.shape(states))
-                    print("Next states shape:", tf.shape(next_states))
-                    print("Next Q-values shape:", tf.shape(next_q_values))
-                    print("Max next Q shape:", tf.shape(max_next_q))
-                    
-                    # Calculate target Q-values
-                    targets = rewards + (1 - dones) * config.gamma * max_next_q
-                    
+                  
                     # Get Q-values for actions taken
                     action_masks = tf.one_hot(actions, config.num_actions)
                     predicted_q_values = tf.reduce_sum(current_q_values * action_masks, axis=1, keepdims=True)
@@ -762,7 +732,7 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     })
     df_nav.to_csv(save_paths['daily_nav'], index=False)
     
-    return final_asset_list
+    return asset_list
 
 def step(action, asset_list, current_index, trend_list, date_range, portfolio_composition, df_list):
     """

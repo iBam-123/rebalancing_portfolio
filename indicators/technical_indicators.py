@@ -12,21 +12,24 @@ def simple_moving_avg(df: pd.DataFrame, price_col=config.label_name, window_size
     return df[price_col].rolling(window=window_size, center=center).mean()
 
 def exponential_moving_avg(df: pd.DataFrame, price_col=config.label_name, window_size=15, center=True):
-    if center == True:
-        ema_df = df[price_col].shift(int(window_size/2)).ewm(span=window_size).mean()
-        return _remove_trailing_data(ema_df, window_size)
+    if df[price_col].isnull().any():
+        df[price_col] = df[price_col].fillna(method='ffill').fillna(method='bfill')
+    
+    if center:
+        ema = df[price_col].shift(int(window_size/2)).ewm(span=window_size).mean()
+        return ema.shift(-int(window_size/2))
     else:
-        ema_df = pd.Series.ewm(df[price_col], span=window_size).mean()
-        return ema_df
+        return df[price_col].ewm(span=window_size).mean()
 
 def macd_line(df: pd.DataFrame, ema1_window_size=12, ema2_window_size=26, center=True):
-    macd_line_df = exponential_moving_avg(df, window_size=ema1_window_size, center=center) - exponential_moving_avg(df, window_size=ema2_window_size, center=center)
-    return macd_line_df
+    ema1 = exponential_moving_avg(df, window_size=ema1_window_size, center=center)
+    ema2 = exponential_moving_avg(df, window_size=ema2_window_size, center=center)
+    return ema1 - ema2
 
 def macd_signal(df: pd.DataFrame, price_col=config.label_name, window_size=9, ema1_window_size=12, ema2_window_size=26, center=True):
-    macd_line_df = pd.DataFrame()
-    macd_line_df[price_col] = macd_line(df, ema1_window_size=ema1_window_size, ema2_window_size=ema2_window_size, center=center)
-    return exponential_moving_avg(macd_line_df, window_size=window_size, center=center)
+    macd = macd_line(df, ema1_window_size, ema2_window_size, center)
+    macd_df = pd.DataFrame({price_col: macd})
+    return exponential_moving_avg(macd_df, window_size=window_size, center=center)
 
 def rsi(df: pd.DataFrame, price_col=config.label_name, window_size=15, center = True):
     delta, upward, downward, upward_ema, downward_ema = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
