@@ -32,6 +32,7 @@ def parse_arguments():
     parser.add_argument("--portfolio", required=True, choices=['portfolio1', 'portfolio2'], help="Select portfolio to train")
     parser.add_argument("--approach", required=True, choices=['gradual', 'full_swing'], help="Select rebalancing approach")
     parser.add_argument("--predict", action="store_true", help="Use LSTM prediction")
+    parser.add_argument("--load", action="store_true", help="Load existing model")
     return parser.parse_args()
 
 # Setelah fungsi parse_arguments()
@@ -136,6 +137,12 @@ class Qnetwork(tf.keras.Model):
         x = tf.cast(inputs, tf.float32)
         x = self.dense1(x)
         return self.dense2(x)
+
+    def save(self, filepath):
+        self.save_weights(filepath)
+    
+    def load_weights(self, filepath):
+        super(Qnetwork, self).load_weights(filepath)
 
     def get_q_values(self, state):
         state = tf.convert_to_tensor(state, dtype=tf.float32)
@@ -871,6 +878,18 @@ def main():
     h_size = config.hidden_layer_size
     mainQN = Qnetwork(h_size)
     targetQN = Qnetwork(h_size)
+
+    if args.load:
+        try:
+            # Coba load existing model
+            mainQN.load_weights(save_paths['model'])
+            print(f"Model loaded from: {save_paths['model']}")
+            # Copy weights ke target network
+            targetQN.set_weights(mainQN.get_weights())
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            print("Starting with a new model.")
+            
     mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
     
     # Initialize replay buffer
