@@ -63,15 +63,21 @@ df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
 # Sekarang kita bisa menggunakan trend_list
 max_epLength = len(trend_list) - 1
 
-def save_training_results(sess, saver, episode, date_range, portfolio_values, 
-                         passive_values, stocks, save_paths):
+def save_training_results(episode, date_range, portfolio_values, 
+                         passive_values, stocks, save_paths, save_interval=100):
     """
     Save model and results at specified intervals
+    
+    Args:
+        episode (int): Current episode number
+        date_range (list): List of dates
+        portfolio_values (list): Portfolio values over time
+        passive_values (list): Passive strategy values over time
+        stocks (list): List of stock names
+        save_paths (dict): Dictionary containing paths for saving files
+        save_interval (int): Interval for saving results (default: 100)
     """
-    if episode % TRAINING_CONFIG['save_interval'] == 0:
-        # Save model weights
-        saver.save(sess, save_paths['model'])
-        
+    if episode % save_interval == 0:
         # Save daily NAV
         nav_df = pd.DataFrame({
             'Date': date_range,
@@ -85,40 +91,28 @@ def save_training_results(sess, saver, episode, date_range, portfolio_values,
             **{stock: values for stock, values in zip(stocks, passive_values)}
         })
         passive_df.to_csv(save_paths['passive_nav'], index=False)
+        
+        print(f"Results saved at episode {episode}")
 
 def get_epsilon(total_steps):
-    """Calculate epsilon for epsilon-greedy policy"""
-    e_rate = TRAINING_CONFIG['start_e']
-    step_drop = (TRAINING_CONFIG['start_e'] - TRAINING_CONFIG['end_e']) / TRAINING_CONFIG['annealing_steps']
-    
-    return max(TRAINING_CONFIG['end_e'], 
-              TRAINING_CONFIG['start_e'] - (step_drop * total_steps))
-
+    return max(config.final_exploration,
+              config.initial_exploration - 
+              (config.exploration_decay * total_steps))
 #parameter
-weight_decay_beta = float('10e-9')
-
-price_period = 30
 risk_level = 1
 
 save_rl_data = True
 save_passive = True
 save_algo_data = True
 
-batch_size = 32
 update_freq = 10
-gamma = .99
 start_e = 1
 end_e = 0.1
 annealing_steps = 5000
-num_episodes = 350
 pre_train_steps = 84400  # 160000
 max_epLength = len(trend_list) - 1
 h_size = 100
 tau = 0.0005
-
-num_actions = 4
-state_dimension = 5
-
 
 # Set the rate of random action decrease.
 e_rate = start_e
@@ -604,6 +598,7 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     # Initialize replay buffer
     epsilon = config.initial_exploration
     replay_buffer = deque(maxlen=config.buffer_size)
+    early_stopping_patience = 50
 
     # Training metrics
     episode_rewards = []
@@ -611,7 +606,7 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     best_reward = float('-inf')
     current_index = 0
     with tqdm(total=config.num_episodes, desc="Training Progress") as pbar:
-      for episode in range(num_episodes):
+      for episode in range(config.num_episodes):
           state = get_next_state(current_index-1, trend_list, date_range, df_list)
           episode_reward = 0
           current_index = 9
@@ -727,6 +722,16 @@ def train_model(df_list, date_range, trend_list, stocks, args):
               print(f"Average Loss: {avg_loss:.4f}")
               print(f"Epsilon: {epsilon:.4f}")
               print("------------------------")
+
+          if episode_reward > best_reward:
+              best_reward = episode_reward
+              no_improvement_count = 0
+          else:
+              no_improvement_count += 1
+        
+          if no_improvement_count >= early_stopping_patience:
+              print(f"Early stopping at episode {episode}")
+              break
     
     # Save results
     save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
@@ -863,13 +868,13 @@ def main():
     df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
 
     # Initialize networks
-    h_size = hidden_layer_size
+    h_size = config.hidden_layer_size
     mainQN = Qnetwork(h_size)
     targetQN = Qnetwork(h_size)
-    mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    mainQN.optimizer = tf.keras.optimizers.Adam(learning_rate=config.learning_rate)
     
     # Initialize replay buffer
-    replay_buffer = deque(maxlen=buffer_size)
+    replay_buffer = deque(maxlen=config.buffer_size)
     
     # Initialize portfolio
     num_assets = len(stocks)
@@ -877,7 +882,7 @@ def main():
     asset_list = [10000/num_assets] * num_assets  # Initial investment split equally
 
     # Training loop
-    for episode in range(num_episodes):
+    for episode in range(config.num_episodes):
         current_index = 9  # Start from 10th data point
         state = get_next_state(current_index-1, trend_list, date_range, df_list)
         episode_reward = 0
@@ -885,7 +890,7 @@ def main():
         while current_index < len(trend_list)-1:
             # Get action using epsilon-greedy
             if np.random.rand() < epsilon:
-                action = np.random.randint(0, num_actions)
+                action = np.random.randint(0, config.num_actions)
             else:
                 q_values = mainQN.get_q_values(norm_state(state))
                 action = get_action(q_values[0].numpy())
@@ -906,8 +911,8 @@ def main():
             ))
             
             # Train on mini-batch
-            if len(replay_buffer) >= batch_size:
-                minibatch = random.sample(replay_buffer, batch_size)
+            if len(replay_buffer) >= config.batch_size:
+                minibatch = random.sample(replay_buffer, config.batch_size)
                 
                 # Prepare batch data
                 states = np.array([norm_state(trans[0]) for trans in minibatch])
@@ -919,7 +924,7 @@ def main():
                 # Calculate target Q-values
                 next_q_values = targetQN.get_q_values(next_states)
                 max_next_q = tf.reduce_max(next_q_values, axis=1)
-                targets = rewards + gamma * (1 - dones) * max_next_q
+                targets = rewards + config.gamma * (1 - dones) * max_next_q
                 
                 # Train main network
                 loss = mainQN.train_step(states, targets)
@@ -929,21 +934,17 @@ def main():
             portfolio_composition = new_portfolio_composition
             asset_list = new_asset_list
             current_index += 1
-            
-            episode_time = time.time() - episode_start_time
-            remaining_episodes = num_episodes - (episode + 1)
-            estimated_remaining_time = remaining_episodes * episode_time
 
             # Decay epsilon
-            if epsilon > final_exploration:
-                epsilon -= exploration_decay
+            if epsilon > config.final_exploration:
+                epsilon -= config.exploration_decay
         
         # Update target network periodically
-        if episode % target_update_freq == 0:
+        if episode % config.target_update_freq == 0:
             targetQN.set_weights(mainQN.get_weights())
             
         # Log progress
-        if episode % log_freq == 0:
+        if episode % config.log_freq == 0:
             print(f"Episode {episode}, Epsilon: {epsilon:.4f}")
     
     # Simpan model utama (mainQN)
