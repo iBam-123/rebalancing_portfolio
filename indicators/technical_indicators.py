@@ -82,17 +82,26 @@ def create_indicator_columns(df: pd.DataFrame, center=False) -> pd.DataFrame:
     5. Stochastic Oscillator - %K less than %D and within 20 - 80
     6. CCI - below -100
     """
-    df['MA'] = simple_moving_avg(df, center=center)
-    df['+MA'] = df['MA'][df['MA'].diff() > 0]
-    df['-MA'] = df['MA'][df['MA'].diff() < 0]
-    df['EMA 10'] = exponential_moving_avg(df, window_size=10, center=center)
-    df['EMA 20'] = exponential_moving_avg(df, window_size=20, center=center)
-    df['+EMA 10'] = df['EMA 10'][df['EMA 10'] > df['EMA 20']]
-    df['-EMA 10'] = df['EMA 10'][df['EMA 10'] < df['EMA 20']]
-    df['MACD Line'] = macd_line(df, center=center)
-    df['MACD Signal'] = macd_signal(df, center=center)
-    df['+MACD Line'] = df['MACD Line'][df['MACD Line'] > df['MACD Signal']]
-    df['-MACD Line'] = df['MACD Line'][df['MACD Line'] < df['MACD Signal']]
+    df = df.copy()
+    
+    # Moving Average
+    df.loc[:, 'MA'] = simple_moving_avg(df, center=center)
+    ma_diff = df['MA'].diff()
+    df.loc[:, '+MA'] = df['MA'].where(ma_diff > 0)
+    df.loc[:, '-MA'] = df['MA'].where(ma_diff < 0)
+    
+    # EMA
+    df.loc[:, 'EMA 10'] = exponential_moving_avg(df, window_size=10, center=center)
+    df.loc[:, 'EMA 20'] = exponential_moving_avg(df, window_size=20, center=center)
+    df.loc[:, '+EMA 10'] = df['EMA 10'].where(df['EMA 10'] > df['EMA 20'])
+    df.loc[:, '-EMA 10'] = df['EMA 10'].where(df['EMA 10'] < df['EMA 20'])
+    
+    # MACD
+    df.loc[:, 'MACD Line'] = macd_line(df, center=center)
+    df.loc[:, 'MACD Signal'] = macd_signal(df, center=center)
+    df.loc[:, '+MACD Line'] = df['MACD Line'].where(df['MACD Line'] > df['MACD Signal'])
+    df.loc[:, '-MACD Line'] = df['MACD Line'].where(df['MACD Line'] < df['MACD Signal'])
+    
     # df['RSI'] = rsi(df)
     # df['+RSI'] = df['RSI'][df['RSI'] < 30]
     # df['-RSI'] = df['RSI'][df['RSI'] > 70]

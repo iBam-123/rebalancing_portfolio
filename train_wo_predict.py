@@ -17,6 +17,8 @@ import os
 from util.algo_dataset import get_algo_dataset
 import random
 from collections import deque
+import time
+from datetime import datetime, timedelta
 
 #tf.compat.v1.disable_eager_execution()
 #arg_parser = argparse.ArgumentParser()
@@ -606,118 +608,125 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     # Training metrics
     episode_rewards = []
     losses = []
-    
+    best_reward = float('-inf')
     current_index = 0
-    for episode in range(num_episodes):
-        state = get_next_state(current_index-1, trend_list, date_range, df_list)
-        episode_reward = 0
-        current_index = 9
+    with tqdm(total=config.num_episodes, desc="Training Progress") as pbar:
+      for episode in range(num_episodes):
+          state = get_next_state(current_index-1, trend_list, date_range, df_list)
+          episode_reward = 0
+          current_index = 9
+          episode_reward = 0
 
-        while current_index < len(trend_list)-1:  # Replace with your episode termination condition
-            # Get action
-            if np.random.rand() < epsilon:
-                action = np.random.randint(0, config.num_actions)
-            else:
-                q_values = mainQN.get_q_values(norm_state(state))
-                action = np.argmax(q_values[0])
+          while current_index < len(trend_list)-1:  # Replace with your episode termination condition
+              # Get action
+              if np.random.rand() < epsilon:
+                  action = np.random.randint(0, config.num_actions)
+              else:
+                  q_values = mainQN.get_q_values(norm_state(state))
+                  action = np.argmax(q_values[0])
 
-            # Take action and get next state and reward
-            next_state, reward, done, new_portfolio_composition, new_asset_list = step(
-                action,
-                asset_list,
-                current_index,
-                trend_list,
-                date_range,
-                portfolio_composition,
-                df_list
-            )
+              # Take action and get next state and reward
+              next_state, reward, done, new_portfolio_composition, new_asset_list = step(
+                  action,
+                  asset_list,
+                  current_index,
+                  trend_list,
+                  date_range,
+                  portfolio_composition,
+                  df_list
+              )
 
-            replay_buffer.append((
-                state,
-                action,
-                reward,
-                next_state,
-                done
-            ))
-            
-            asset_list = new_asset_list
-            episode_reward += reward
+              replay_buffer.append((
+                  state,
+                  action,
+                  reward,
+                  next_state,
+                  done
+              ))
+              
+              asset_list = new_asset_list
+              episode_reward += reward
 
-            # Training
-            if len(replay_buffer) >= config.batch_size:
-                # Sample minibatch
-                minibatch = random.sample(replay_buffer, config.batch_size)
-                
-                # Prepare batch data
-                states = np.array([norm_state(trans[0]) for trans in minibatch])
-                actions = np.array([trans[1] for trans in minibatch])
-                rewards = np.array([trans[2] for trans in minibatch])
-                next_states = np.array([norm_state(trans[3]) for trans in minibatch])
-                dones = np.array([trans[4] for trans in minibatch])
-
-                states = tf.convert_to_tensor(states, dtype=tf.float32)
-                next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
-                rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
-                actions = tf.convert_to_tensor(actions, dtype=tf.int32)
-                dones = tf.convert_to_tensor(dones, dtype=tf.float32)
-                
-                rewards = tf.reshape(rewards, (config.batch_size, 1))
-                dones = tf.reshape(dones, (config.batch_size, 1))
-
-                # Calculate target Q-values
-                next_q_values = targetQN.get_q_values(next_states)
-                max_next_q = tf.reduce_max(next_q_values, axis=1)
-                max_next_q = tf.reshape(max_next_q, [-1, 1])  # Reshape to column vector
-                
-                # Calculate targets
-                targets = rewards[:, None] + config.gamma * (1 - dones[:, None]) * max_next_q
-
-                with tf.GradientTape() as tape:
-                    # Get current Q-values
-                    current_q_values = mainQN(states)
+              # Training
+              if len(replay_buffer) >= config.batch_size:
+                  # Sample minibatch
+                  minibatch = random.sample(replay_buffer, config.batch_size)
                   
-                    # Get Q-values for actions taken
-                    action_masks = tf.one_hot(actions, config.num_actions)
-                    predicted_q_values = tf.reduce_sum(current_q_values * action_masks, axis=1, keepdims=True)
+                  # Prepare batch data
+                  states = np.array([norm_state(trans[0]) for trans in minibatch])
+                  actions = np.array([trans[1] for trans in minibatch])
+                  rewards = np.array([trans[2] for trans in minibatch])
+                  next_states = np.array([norm_state(trans[3]) for trans in minibatch])
+                  dones = np.array([trans[4] for trans in minibatch])
+
+                  states = tf.convert_to_tensor(states, dtype=tf.float32)
+                  next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
+                  rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+                  actions = tf.convert_to_tensor(actions, dtype=tf.int32)
+                  dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+                  
+                  rewards = tf.reshape(rewards, (config.batch_size, 1))
+                  dones = tf.reshape(dones, (config.batch_size, 1))
+
+                  # Calculate target Q-values
+                  next_q_values = targetQN.get_q_values(next_states)
+                  max_next_q = tf.reduce_max(next_q_values, axis=1)
+                  max_next_q = tf.reshape(max_next_q, [-1, 1])  # Reshape to column vector
+                  
+                  # Calculate targets
+                  targets = rewards[:, None] + config.gamma * (1 - dones[:, None]) * max_next_q
+
+                  with tf.GradientTape() as tape:
+                      # Get current Q-values
+                      current_q_values = mainQN(states)
                     
-                    # Calculate loss
-                    loss = tf.reduce_mean(tf.square(targets - predicted_q_values))
+                      # Get Q-values for actions taken
+                      action_masks = tf.one_hot(actions, config.num_actions)
+                      predicted_q_values = tf.reduce_sum(current_q_values * action_masks, axis=1, keepdims=True)
+                      
+                      # Calculate loss
+                      loss = tf.reduce_mean(tf.square(targets - predicted_q_values))
 
-                # Calculate and apply gradients
-                gradients = tape.gradient(loss, mainQN.trainable_variables)
-                mainQN.optimizer.apply_gradients(zip(gradients, mainQN.trainable_variables))
-                
-                losses.append(loss.numpy())
+                  # Calculate and apply gradients
+                  gradients = tape.gradient(loss, mainQN.trainable_variables)
+                  mainQN.optimizer.apply_gradients(zip(gradients, mainQN.trainable_variables))
+                  
+                  losses.append(loss.numpy())
 
-                
-            state = next_state
-            portfolio_composition = new_portfolio_composition
-            asset_list = new_asset_list
-            episode_reward += reward
-            current_index += 1
-            
-            # Decay epsilon
-            if epsilon > config.final_exploration:
-                epsilon -= config.exploration_decay
-            
-            if done:
-                break
-                # Update target network periodically
-        if episode % config.target_update_freq == 0:
-            targetQN.set_weights(mainQN.get_weights())
-        
-        episode_rewards.append(episode_reward)
-        
-        
-        # Logging
-        if episode % 100 == 0:
-            avg_reward = np.mean(episode_rewards[-100:])
-            avg_loss = np.mean(losses[-100:]) if losses else 0
-            print(f"Episode: {episode}")
-            print(f"Average Reward: {avg_reward:.2f}")
-            print(f"Average Loss: {avg_loss:.4f}")
-            print(f"Epsilon: {epsilon:.4f}")
-            print("------------------------")
+                  
+              state = next_state
+              portfolio_composition = new_portfolio_composition
+              asset_list = new_asset_list
+              episode_reward += reward
+              current_index += 1
+              
+              # Decay epsilon
+              if epsilon > config.final_exploration:
+                  epsilon -= config.exploration_decay
+              
+              if done:
+                  break
+                  # Update target network periodically
+          if episode % config.target_update_freq == 0:
+              targetQN.set_weights(mainQN.get_weights())
+          
+          episode_rewards.append(episode_reward)
+          
+          pbar.update(1)
+          pbar.set_postfix({
+                'Episode Reward': f'{episode_reward:.2f}',
+                'Epsilon': f'{epsilon:.2f}'
+            })
+          
+          # Logging
+          if episode % 100 == 0:
+              avg_reward = np.mean(episode_rewards[-100:])
+              avg_loss = np.mean(losses[-100:]) if losses else 0
+              print(f"Episode: {episode}")
+              print(f"Average Reward: {avg_reward:.2f}")
+              print(f"Average Loss: {avg_loss:.4f}")
+              print(f"Epsilon: {epsilon:.4f}")
+              print("------------------------")
     
     # Save results
     save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
@@ -852,7 +861,7 @@ def main():
     # Setup paths and load data
     save_paths = get_save_paths(args.portfolio, args.approach, args.predict)
     df_list, date_range, trend_list, stocks = util.get_algo_dataset(args.portfolio)
-    
+
     # Initialize networks
     h_size = hidden_layer_size
     mainQN = Qnetwork(h_size)
@@ -866,11 +875,12 @@ def main():
     num_assets = len(stocks)
     portfolio_composition = [1.0/num_assets] * num_assets  # Equal weight initially
     asset_list = [10000/num_assets] * num_assets  # Initial investment split equally
-    
+
     # Training loop
     for episode in range(num_episodes):
         current_index = 9  # Start from 10th data point
         state = get_next_state(current_index-1, trend_list, date_range, df_list)
+        episode_reward = 0
         
         while current_index < len(trend_list)-1:
             # Get action using epsilon-greedy
@@ -920,6 +930,10 @@ def main():
             asset_list = new_asset_list
             current_index += 1
             
+            episode_time = time.time() - episode_start_time
+            remaining_episodes = num_episodes - (episode + 1)
+            estimated_remaining_time = remaining_episodes * episode_time
+
             # Decay epsilon
             if epsilon > final_exploration:
                 epsilon -= exploration_decay
@@ -931,8 +945,6 @@ def main():
         # Log progress
         if episode % log_freq == 0:
             print(f"Episode {episode}, Epsilon: {epsilon:.4f}")
-            
-    print("Training selesai. Menyimpan model...")
     
     # Simpan model utama (mainQN)
     mainQN.save(save_paths['model'])
@@ -946,6 +958,9 @@ def main():
     df_nav.to_csv(save_paths['daily_nav'], index=False)
     print(f"Data NAV harian disimpan di: {save_paths['daily_nav']}")
     
+    # Final completion message
+    print("All processes completed successfully!")
+
     # Simpan data NAV pasif
     passive_asset_list = [10000] * len(stocks)  # Inisialisasi dengan investasi awal
     for i, date in enumerate(date_range):

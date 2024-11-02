@@ -8,10 +8,7 @@ PORTFOLIO_CONFIG = {
     },
     'portfolio2': {
         'num_assets': 20,
-        'assets': ['STOCK1', 'STOCK2', 'STOCK3', 'STOCK4', 'STOCK5',
-                  'STOCK6', 'STOCK7', 'STOCK8', 'STOCK9', 'STOCK10',
-                  'STOCK11', 'STOCK12', 'STOCK13', 'STOCK14', 'STOCK15',
-                  'STOCK16', 'STOCK17', 'STOCK18', 'STOCK19', 'STOCK20'],
+        'assets': ['USD Govt', 'USD SSA', 'EMUSD Int.', 'EMUSD Ext.', 'US MBS Int.', 'US MBS Ext.', 'US Corp Int.', 'US Corp Ext.', 'EUR Govt', 'EUR SSA', 'GBP Govt', 'GBP SSA', 'AUD Govt', 'AUD SSA', 'NZD Govt', 'CAD Govt', 'CAD SSA', 'CNY Govt', 'JPY Govt', 'EMLC'],
         'start_date': '2021-01-01',
         'end_date': '2023-12-31'
     }
@@ -23,6 +20,7 @@ num_actions = 4
 price_period = 10
 
 # Training parameters
+num_episodes = 1000
 gamma = 0.99
 batch_size = 32
 buffer_size = 100000
