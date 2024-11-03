@@ -49,7 +49,7 @@ def get_save_paths(portfolio: str, approach: str, predict: bool = False):
     os.makedirs(folder_path, exist_ok=True)
     
     return {
-        'model': f'{folder_path}/model.keras',  # Tambahkan ekstensi .keras
+        'model': f'{folder_path}/model.weights.h5',  # Tambahkan ekstensi .keras
         'daily_nav': f'{folder_path}/daily_nav.csv',
         'passive_nav': f'{folder_path}/passive_daily_nav.csv'
     }
@@ -776,6 +776,13 @@ def train_model(df_list, date_range, trend_list, stocks, args):
         'Net': asset_list
     })
     df_nav.to_csv(save_paths['daily_nav'], index=False)
+
+    #save passive NAV
+    passive_df = pd.DataFrame({
+        'Date': date_range,
+        **{stock: values for stock, values in zip(stocks, passive_values)}
+    })
+    passive_df.to_csv(save_paths['passive_nav'], index=False)
     
     return asset_list
 
@@ -832,6 +839,13 @@ def save_results(date_range, asset_list, portfolio, approach, predict):
         'Net': asset_list
     })
     df_nav.to_csv(f'{save_path}/daily_nav.csv', index=False)
+
+    #save passive NAV
+    passive_df = pd.DataFrame({
+        'Date': date_range,
+        **{stock: values for stock, values in zip(stocks, passive_values)}
+    })
+    passive_df.to_csv(save_paths['passive_nav'], index=False)
 
 def calculate_daily_nav(portfolio_list, trend_list, date_range, df_list):
     """Calculate daily NAV for the portfolio"""
@@ -1001,6 +1015,13 @@ def main():
     })
     df_nav.to_csv(save_paths['daily_nav'], index=False)
     print(f"Data NAV harian disimpan di: {save_paths['daily_nav']}")
+
+    passive_df = pd.DataFrame({
+        'Date': date_range,
+        **{stock: values for stock, values in zip(stocks, passive_values)}
+    })
+    passive_df.to_csv(save_paths['passive_nav'], index=False)
+    print(f"Data NAV harian disimpan di: {save_paths['passive_nav']}")
     
     # Final completion message
     print("All processes completed successfully!")
@@ -1064,6 +1085,13 @@ if __name__ == "__main__":
         
         print(f"\nResults saved to: {os.path.dirname(save_paths['model'])}")
         
+        print("Training selesai. Menjalankan analisis performa...")
+        import subprocess
+        subprocess.run(["python", "performance_analysis.py", 
+                    "--portfolio", args.portfolio, 
+                    "--approach", args.approach, 
+                    "--predict" if args.predict else ""])
+
     except Exception as e:
         print(f"\nError during training: {str(e)}")
         raise
