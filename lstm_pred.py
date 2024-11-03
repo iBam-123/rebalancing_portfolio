@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 import indicators
 import argparse
+from tensorflow.keras.models import load_model
 
 def lstm_model():
     model = tf.keras.Sequential()
@@ -88,7 +89,7 @@ plt.plot(history.history['val_loss'], label='Val_Loss')
 plt.legend()
 
 #%%
-from tensorflow.keras.models import load_model
+
 
 
 model = load_model('data/rl/{stock_file}/lstm/stock_pred_{stock_name}.hdf5'.format(stock_file=stock_file, stock_name=stock_name))

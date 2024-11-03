@@ -49,7 +49,7 @@ def get_save_paths(portfolio: str, approach: str, predict: bool = False):
     os.makedirs(folder_path, exist_ok=True)
     
     return {
-        'model': f'{folder_path}/model.weights.h5',  # Tambahkan ekstensi .keras
+        'model': f'{folder_path}/model.weights.h5',
         'daily_nav': f'{folder_path}/daily_nav.csv',
         'passive_nav': f'{folder_path}/passive_daily_nav.csv'
     }
@@ -176,8 +176,11 @@ def norm_state(state):
 
 
 def process_action(action, portfolio_composition):
-    new_portfolio_composition = deepcopy(portfolio_composition)
+    MIN_ALLOCATION = 0.05  # 5% minimum per aset
+    MAX_ALLOCATION = 0.30
     num_assets = len(portfolio_composition)
+    new_portfolio_composition = deepcopy(portfolio_composition)
+
     
     if args.approach == 'full_swing':
         ####################### Full switch ##############################
@@ -260,7 +263,6 @@ def process_action(action, portfolio_composition):
     # Normalize to ensure sum = 1
     total = sum(new_portfolio_composition)
     new_portfolio_composition = [x/total for x in new_portfolio_composition]
-    
     return new_portfolio_composition
 
 #pertanyakan
@@ -771,18 +773,16 @@ def train_model(df_list, date_range, trend_list, stocks, args):
     mainQN.save(save_paths['model'])
     
     # Save daily NAV
-    df_nav = pd.DataFrame({
-        'Date': date_range,
-        'Net': asset_list
-    })
+    df_nav = pd.DataFrame({'Net': asset_list}, index=date_range[:len(asset_list)])
+    df_nav = df_nav.reindex(date_range, method='ffill')
+    df_nav.reset_index(inplace=True)
+    df_nav.columns = ['Date', 'Net']
+    
     df_nav.to_csv(save_paths['daily_nav'], index=False)
 
     #save passive NAV
-    passive_df = pd.DataFrame({
-        'Date': date_range,
-        **{stock: values for stock, values in zip(stocks, passive_values)}
-    })
-    passive_df.to_csv(save_paths['passive_nav'], index=False)
+    df_passive = calculate_passive_nav(date_range, df_list)
+    df_passive.to_csv(save_paths['passive_nav'], index=False)
     
     return asset_list
 
@@ -826,26 +826,61 @@ def save_results(date_range, asset_list, portfolio, approach, predict):
     """Save training results"""
     # Determine save path
     base_path = f'data/rl/{portfolio}'
-    subfolder = 'non_lagged' if predict else 'lagged'
-    if approach == 'full_swing':
-        subfolder = f'fs_{subfolder}'
+    if approach == 'gradual':
+        subfolder = 'non_lagged' if predict else 'lagged'
+    else:  # full_swing
+        subfolder = 'fs_non_lagged' if predict else 'fs_lagged'
     
     save_path = f'{base_path}/{subfolder}'
     os.makedirs(save_path, exist_ok=True)
-    
+
     # Save NAV data
     df_nav = pd.DataFrame({
         'Date': date_range,
-        'Net': asset_list
+        'Net': [sum(assets) for assets in asset_list]
     })
+
+    for i, stock in enumerate(stocks):
+      active_data[stock] = [assets[i] for assets in asset_list]
+
+    df_nav = pd.DataFrame(active_data)
+    df_nav[stock] = [assets[i] for assets in asset_list]
     df_nav.to_csv(f'{save_path}/daily_nav.csv', index=False)
 
-    #save passive NAV
-    passive_df = pd.DataFrame({
+    passive_asset_list = []
+    initial_investment = 10000  # Initial investment per asset
+        
+        # Initialize passive portfolio
+    passive_assets = [initial_investment] * len(stocks)
+    passive_asset_list.append(passive_assets.copy())
+
+    for i in range(1, len(date_range)):
+            current_passive = []
+            for j, stock in enumerate(stocks):
+                # Get price changes
+                prev_close = df_list[j][df_list[j]['Date'] == date_range[i-1]]['Close'].values[0]
+                curr_close = df_list[j][df_list[j]['Date'] == date_range[i]]['Close'].values[0]
+                
+                # Update asset value based on price change
+                passive_value = passive_asset_list[-1][j] * (curr_close / prev_close)
+                current_passive.append(passive_value)
+            
+            passive_asset_list.append(current_passive)
+
+    passive_data = {
         'Date': date_range,
-        **{stock: values for stock, values in zip(stocks, passive_values)}
-    })
-    passive_df.to_csv(save_paths['passive_nav'], index=False)
+        'Net': [sum(passive_assets) for passive_assets in passive_asset_list]
+    }
+    
+    # Add column for each asset in passive portfolio
+    for i, stock in enumerate(stocks):
+        passive_data[stock] = [passive_assets[i] for passive_assets in passive_asset_list]
+
+    #save passive NAV
+    df_passive = pd.DataFrame(passive_data)
+    df_passive.to_csv(save_paths['passive_nav'], index=False)
+    print(f"Passive portfolio data saved to: {save_paths['passive_nav']}")
+
 
 def calculate_daily_nav(portfolio_list, trend_list, date_range, df_list):
     """Calculate daily NAV for the portfolio"""
@@ -871,23 +906,30 @@ def calculate_daily_nav(portfolio_list, trend_list, date_range, df_list):
         
     return pd.DataFrame(nav_dict)
 
-def calculate_passive_nav(date_range, df_list):
-    """Calculate passive NAV (buy and hold strategy)"""
-    nav_dict = {'Date': date_range}
-    initial_investment = 1000000 / len(df_list)
+def calculate_passive_nav(date_range, df_list, initial_investment=1000000):
+    """Calculate passive buy-and-hold NAV"""
+    passive_values = []
+    num_assets = len(df_list)
+    asset_values = [initial_investment/num_assets] * num_assets  # Equal initial investment
     
-    for i, df in enumerate(df_list):
-        asset_values = []
-        initial_price = df[df['Date'] == date_range[0]]['Close'].values[0]
+    for date in date_range:
+        current_total = 0
+        for i, df in enumerate(df_list):
+            row = df[df['Date'] == date]
+            if not row.empty:
+                current_price = row['Close'].values[0]
+                if len(passive_values) > 0:
+                    prev_date = passive_values[-1]['Date']
+                    prev_price = df[df['Date'] == prev_date]['Close'].values[0]
+                    asset_values[i] *= current_price / prev_price
+                current_total += asset_values[i]
         
-        for date in date_range:
-            current_price = df[df['Date'] == date]['Close'].values[0]
-            asset_value = initial_investment * (current_price / initial_price)
-            asset_values.append(asset_value)
-            
-        nav_dict[f'Asset_{i+1}'] = asset_values
-        
-    return pd.DataFrame(nav_dict)
+        passive_values.append({
+            'Date': date,
+            'Net': current_total
+        })
+    
+    return pd.DataFrame(passive_values)
 
 def get_action(state, mainQN, epsilon=0.0):
     if np.random.random() < epsilon:
@@ -1016,29 +1058,7 @@ def main():
     df_nav.to_csv(save_paths['daily_nav'], index=False)
     print(f"Data NAV harian disimpan di: {save_paths['daily_nav']}")
 
-    passive_df = pd.DataFrame({
-        'Date': date_range,
-        **{stock: values for stock, values in zip(stocks, passive_values)}
-    })
-    passive_df.to_csv(save_paths['passive_nav'], index=False)
-    print(f"Data NAV harian disimpan di: {save_paths['passive_nav']}")
-    
-    # Final completion message
-    print("All processes completed successfully!")
-
-    # Simpan data NAV pasif
-    passive_asset_list = [10000] * len(stocks)  # Inisialisasi dengan investasi awal
-    for i, date in enumerate(date_range):
-        for j, stock in enumerate(stocks):
-            if i > 0:  # Skip hari pertama
-                prev_close = df_list[j][df_list[j]['Date'] == date_range[i-1]]['Close'].values[0]
-                curr_close = df_list[j][df_list[j]['Date'] == date]['Close'].values[0]
-                passive_asset_list[j] *= curr_close / prev_close
-    
-    df_passive = pd.DataFrame({
-        'Date': date_range,
-        'Net': [sum(passive_asset_list)] * len(date_range)
-    })
+    df_passive = calculate_passive_nav(date_range, df_list)
     df_passive.to_csv(save_paths['passive_nav'], index=False)
     print(f"Data NAV pasif disimpan di: {save_paths['passive_nav']}")
     
